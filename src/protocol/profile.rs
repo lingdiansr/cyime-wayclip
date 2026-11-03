@@ -46,15 +46,23 @@ impl ClipboardProfile {
 
     pub fn validate(&self) -> Result<(), ProfileError> {
         validate_text(self.text.as_bytes())?;
-        if self.source.len() > MAX_SOURCE_BYTES { return Err(ProfileError::SourceTooLarge); }
+        if self.source.len() > MAX_SOURCE_BYTES {
+            return Err(ProfileError::SourceTooLarge);
+        }
         Ok(())
     }
 }
 
 pub fn validate_text(bytes: &[u8]) -> Result<(), ProfileError> {
-    if bytes.len() > MAX_TEXT_BYTES { return Err(ProfileError::TooLarge); }
-    if bytes.contains(&0) { return Err(ProfileError::Nul); }
-    std::str::from_utf8(bytes).map(|_| ()).map_err(|_| ProfileError::InvalidUtf8)
+    if bytes.len() > MAX_TEXT_BYTES {
+        return Err(ProfileError::TooLarge);
+    }
+    if bytes.contains(&0) {
+        return Err(ProfileError::Nul);
+    }
+    std::str::from_utf8(bytes)
+        .map(|_| ())
+        .map_err(|_| ProfileError::InvalidUtf8)
 }
 
 pub fn hash_text(text: &[u8]) -> String {
@@ -65,17 +73,29 @@ pub fn hash_text(text: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn preserves_unicode_and_crlf() {
+    #[test]
+    fn preserves_unicode_and_crlf() {
         let p = ClipboardProfile::text("你好\r\n🌍").unwrap();
         assert_eq!(p.size, "你好\r\n🌍".len());
         assert_eq!(p.hash, hash_text(p.text.as_bytes()));
     }
-    #[test] fn enforces_boundaries() {
+    #[test]
+    fn enforces_boundaries() {
         assert!(ClipboardProfile::text("a".repeat(MAX_TEXT_BYTES)).is_ok());
-        assert_eq!(ClipboardProfile::text("a".repeat(MAX_TEXT_BYTES + 1)).unwrap_err(), ProfileError::TooLarge);
+        assert_eq!(
+            ClipboardProfile::text("a".repeat(MAX_TEXT_BYTES + 1)).unwrap_err(),
+            ProfileError::TooLarge
+        );
     }
-    #[test] fn rejects_nul() { assert_eq!(ClipboardProfile::text("a\0b").unwrap_err(), ProfileError::Nul); }
-    #[test] fn json_shape_is_stable() {
+    #[test]
+    fn rejects_nul() {
+        assert_eq!(
+            ClipboardProfile::text("a\0b").unwrap_err(),
+            ProfileError::Nul
+        );
+    }
+    #[test]
+    fn json_shape_is_stable() {
         let p = ClipboardProfile::text("hello").unwrap();
         let value: serde_json::Value = serde_json::to_value(p).unwrap();
         assert_eq!(value["type"], "text");
