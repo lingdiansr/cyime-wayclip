@@ -10,8 +10,6 @@
 - Android 客户端（CyIME）：https://github.com/Cyletix/CyIME
 - Android APK：https://github.com/Cyletix/CyIME/releases
 
-Android 端的协议实现位于 CyIME 源码的 `app/src/main/java/com/kingzcheung/xime/clipboard/sync/DeviceHost.kt`。
-
 ## 当前能力
 
 - Wayland 桌面剪贴板读取和写入

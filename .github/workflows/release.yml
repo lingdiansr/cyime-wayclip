@@ -5,24 +5,36 @@ on:
 permissions:
   contents: write
 jobs:
-  release:
+  linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build release
+      - name: Install packaging tools
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev rpm
+      - name: Build binary
         run: cargo build --release --all-features
-      - name: Package Linux tarball
+      - name: Build packages
         shell: bash
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
           root="cyime-wayclip-${version}-x86_64-unknown-linux-gnu"
           mkdir -p "$root/usr/bin" "$root/usr/share/cyime-wayclip" "$root/usr/lib/systemd/user"
           install -m755 target/release/cyime-wayclip "$root/usr/bin/"
-          install -m644 packaging/cyime-wayclip.service "$root/usr/share/cyime-wayclip/"
-          sed "s#@bindir@#/usr/bin#g" packaging/cyime-wayclip.service > "$root/usr/lib/systemd/user/cyime-wayclip.service"
-          tar -C "$root" -czf "$root.tar.gz" .
+          install -m644 README.md packaging/cyime-wayclip.service "$root/usr/share/cyime-wayclip/"
+          sed 's#@bindir@#/usr/bin#g' packaging/cyime-wayclip.service > "$root/usr/lib/systemd/user/cyime-wayclip.service"
+          tar -C "$root" -czf "dist/$root.tar.gz" .
+          mkdir -p debian/cyime-wayclip/DEBIAN
+          cp -r packaging/debian/* debian/
+          sed -i "s/^Version:.*/Version: $version/" debian/control
+          dpkg-deb --build debian/cyime-wayclip "dist/cyime-wayclip_${version}_amd64.deb"
+          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          tar -czf "rpmbuild/SOURCES/cyime-wayclip-${version}.tar.gz" --transform "s,^,cyime-wayclip-${version}/," --exclude=target --exclude=.git .
+          sed "s/^Version:.*/Version: $version/" packaging/rpm.spec > rpmbuild/SPECS/cyime-wayclip.spec
+          rpmbuild --define "_topdir $PWD/rpmbuild" -ba rpmbuild/SPECS/cyime-wayclip.spec || true
+          find rpmbuild/RPMS -type f -name '*.rpm' -exec cp {} dist/ \; || true
       - uses: softprops/action-gh-release@v2
         with:
-          files: '*.tar.gz'
+          files: dist/*
