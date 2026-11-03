@@ -1,5 +1,5 @@
 use cyime_wayclip::{
-    clipboard::{ClipboardProvider, ProviderStatus, UnavailableProvider},
+    clipboard::{ClipboardProvider, UnavailableProvider},
     config::Config,
 };
 fn main() {
@@ -15,7 +15,7 @@ fn main() {
     }
 }
 fn doctor() {
-    let mut p = UnavailableProvider;
+    let p = UnavailableProvider;
     println!("config={:?}", Config::path());
     println!("wayland={:?}", p.status());
 }
