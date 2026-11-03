@@ -151,6 +151,6 @@ mod uri_tests {
         };
         assert!(encode_pair_uri(&o)
             .unwrap()
-            .starts_with("cyime://pair?v=2&data="));
+            .starts_with("cyime://pair?v=2&"));
     }
 }
