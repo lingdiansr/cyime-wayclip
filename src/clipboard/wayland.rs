@@ -163,23 +163,31 @@ impl DataControlProvider {
 }
 #[cfg(feature = "wayland")]
 pub fn copy_text(text: &str) -> Result<(), String> {
-    use wl_clipboard_rs::copy::{
-        copy, ClipboardType, MimeType, Options, Seat, ServeRequests, Source,
-    };
-    let mut options = Options::new();
-    options
-        .clipboard(ClipboardType::Regular)
-        .seat(Seat::All)
-        .serve_requests(ServeRequests::Unlimited);
-    options.foreground(true);
-    let prepared = options
-        .prepare_copy(
-            Source::Bytes(text.as_bytes().to_vec().into()),
-            MimeType::Text,
-        )
-        .map_err(|e| e.to_string())?;
-    prepared.serve().map_err(|e| e.to_string())
+    // wl-copy owns a Wayland data source and remains alive to serve requests;
+    // spawning it keeps the HTTP worker nonblocking while preserving lifetime.
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("wl-copy")
+        .arg("--type")
+        .arg("text/plain;charset=utf-8")
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn wl-copy: {e}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or("wl-copy stdin unavailable")?
+        .write_all(text.as_bytes())
+        .map_err(|e| format!("write wl-copy: {e}"))?;
+    let status = child.wait().map_err(|e| format!("wait wl-copy: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("wl-copy exited {status}"))
+    }
 }
+
 #[cfg(feature = "wayland")]
 pub fn paste_text() -> Result<String, String> {
     use wl_clipboard_rs::paste::{get_contents, ClipboardType, MimeType, Seat};
