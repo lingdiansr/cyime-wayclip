@@ -147,4 +147,4 @@ GitHub Actions 会在 push 和 pull request 时执行检查；推送 `v*` 标签
 
 当前版本：`0.1.0`。
 
-本项目采用 MIT License。Android 客户端 CyIME 使用其仓库声明的许可证；两者是独立项目，请分别遵守对应许可证。
+本项目与 Android 端 CyIME 一致，采用 GNU General Public License v3.0 或更高版本（GPL-3.0-or-later）。详见 [LICENSE](LICENSE) 和 [CONTRIBUTING.md](CONTRIBUTING.md)。
