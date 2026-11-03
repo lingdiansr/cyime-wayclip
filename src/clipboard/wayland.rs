@@ -97,3 +97,21 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandCapabiliti
     ) {
     }
 }
+#[cfg(feature = "wayland")]
+pub fn has_ext_data_control(caps: &WaylandCapabilities) -> bool {
+    caps.globals
+        .iter()
+        .any(|g| g == "ext_data_control_manager_v1")
+}
+#[cfg(test)]
+mod ext_tests {
+    use super::*;
+    #[test]
+    fn ext_detection() {
+        let c = WaylandCapabilities {
+            connected: true,
+            globals: vec!["ext_data_control_manager_v1".into()],
+        };
+        assert!(has_ext_data_control(&c));
+    }
+}
