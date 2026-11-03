@@ -1,104 +1,141 @@
 # CyIME Wayclip
 
-Wayland clipboard synchronization between a Linux desktop and CyIME on Android.
-It supports secure v2 HTTPS/QR pairing, bidirectional text clipboard sync, persistent identity, and a systemd user service.
+**CyIME Wayclip 是 CyIME 的 Linux 桌面剪贴板同步服务。**
 
-> **Status:** 0.1.0 preview release. Text clipboard synchronization is supported; binary clipboard data, active push notifications, and complete multi-device mesh semantics are not yet implemented.
+它运行在 Linux Wayland 用户会话中，与 Android 端 CyIME 配对后，实现 Linux 与手机之间的文本剪贴板双向同步。本项目不是输入法，也不是通用的剪贴板管理器；核心目标是为 CyIME 提供可靠、安全、可持久运行的 Linux 服务端。
 
-## Features
+## 项目关系
 
-- Wayland clipboard read/write (no X11 fallback)
-- Android v2 QR pairing over HTTPS with certificate fingerprint pinning
-- Bearer-authenticated status and clipboard APIs
-- ETag-based polling and stale-update protection
-- Persistent config, TLS identity, and server identity
-- systemd user-service integration
-- Linux x86_64 release tarball plus Debian/RPM packaging metadata
+- Linux 服务端（本项目）：https://github.com/lingdiansr/cyime-wayclip
+- Android 客户端（CyIME）：https://github.com/Cyletix/CyIME
+- Android APK：https://github.com/Cyletix/CyIME/releases
 
-## Requirements
+Android 端的协议实现位于 CyIME 源码的 `app/src/main/java/com/kingzcheung/xime/clipboard/sync/DeviceHost.kt`。
 
-- Linux with a Wayland compositor and a working clipboard data-control protocol
-- Rust stable (for source builds)
-- Android CyIME build containing the native v2 clipboard integration
-- Same trusted LAN/Wi-Fi for QR pairing
+## 当前能力
 
-## Install
+- Wayland 桌面剪贴板读取和写入
+- Linux 与 Android 文本剪贴板双向同步
+- Android v2 HTTPS/二维码配对
+- 证书指纹固定和 Bearer Token 认证
+- ETag 轮询和剪贴板内容去重
+- `stamp` 防止旧内容覆盖新内容
+- TLS 身份、服务端身份和配置持久化
+- systemd 用户服务模式
+- Linux x86_64 发布包、Debian/RPM 打包元数据
 
-Download the Linux x86_64 archive from the [0.1.0 release](https://github.com/lingdiansr/cyime-wayclip/releases/tag/v0.1.0), or build from source:
+当前版本主要支持**文本**剪贴板。二进制数据、主动推送和完整多设备 mesh 仍在后续计划中。
+
+## 环境要求
+
+- Linux
+- Wayland 合成器，并启用可用的 clipboard data-control 协议
+- Android 9（API 28）及以上的 CyIME
+- Linux 与 Android 位于同一可信局域网/Wi-Fi
+
+本项目不提供 X11 回退，也不建议将服务暴露到公网。
+
+## 安装 Linux 服务端
+
+### 发布包
+
+从 [CyIME Wayclip Releases](https://github.com/lingdiansr/cyime-wayclip/releases) 下载 Linux x86_64 tarball：
 
 ```sh
+tar -xzf cyime-wayclip-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+install -Dm755 cyime-wayclip-*/usr/bin/cyime-wayclip ~/.local/bin/cyime-wayclip
+```
+
+### 从源码构建
+
+```sh
+git clone https://github.com/lingdiansr/cyime-wayclip.git
+cd cyime-wayclip
 cargo build --release --all-features
 install -Dm755 target/release/cyime-wayclip ~/.local/bin/cyime-wayclip
 ```
 
-For Debian/RPM builders, use `packaging/debian/` or `packaging/rpm.spec`.
+Debian 和 RPM 构建元数据分别位于 `packaging/debian/` 和 `packaging/rpm.spec`。
 
-## Configure and run
+## 初始化配置和用户服务
 
-Initialize the persistent configuration:
+初始化配置文件：
 
 ```sh
 cyime-wayclip config init
 cyime-wayclip doctor
 ```
 
-Run as a user service:
+安装并启动 systemd 用户服务：
 
 ```sh
 cyime-wayclip service install
 cyime-wayclip service status
 ```
 
-The service runs in the logged-in graphical session. It is not a system service and cannot access a user clipboard while logged out. To remove it:
+服务运行在当前登录的图形用户会话中，而不是 system service。卸载：
 
 ```sh
 cyime-wayclip service uninstall
 ```
 
-## Android client
+如果发行版没有运行 user systemd manager，也可以直接运行 `serve-v2`；但必须保持进程运行。
 
-The Android peer is **CyIME**, maintained in the companion repository:
+## 与 Android CyIME 配对
 
-- Repository: https://github.com/Cyletix/CyIME
-- Releases/APK: https://github.com/Cyletix/CyIME/releases
-- Android source: `app/src/main/java/com/kingzcheung/xime/clipboard/sync/DeviceHost.kt`
-
-Install a recent CyIME APK (Android 9/API 28 or newer), enable CyIME as the active input method, then open its clipboard-sync settings. The native v2 client implements QR pairing, status polling, ETag clipboard exchange, and Bearer-token authentication expected by this project.
-
-## Pair Android and sync
-
-Start the v2 pairing server on the LAN interface:
+启动 Linux v2 配对服务：
 
 ```sh
 cyime-wayclip serve-v2
 ```
 
-Scan the printed QR code in CyIME's clipboard-sync settings. Keep the terminal running while pairing. After pairing, test both directions:
+终端会输出二维码。然后在 Android CyIME 中：
 
-1. Copy text on Linux and wait for it to appear on Android.
-2. Copy text on Android and verify it appears in the Wayland clipboard.
+1. 安装并启用 CyIME 输入法；
+2. 打开剪贴板同步设置；
+3. 选择扫描二维码添加电脑；
+4. 扫描 Linux 终端二维码；
+5. 确认连接后测试双向复制。
 
-The default v2 listener is `0.0.0.0:9876`; pass an explicit address such as `10.42.0.1:9876` when needed. Only expose it on a trusted private network. The v1 HTTP server is legacy and insecure on hostile networks.
+测试顺序：
 
-## Persistent data
+1. 在 Linux 上复制文本，确认 Android 剪贴板出现；
+2. 在 Android 上复制文本，确认 Linux Wayland 剪贴板出现。
 
-- Config: `${XDG_CONFIG_HOME:-~/.config}/cyime-wayclip/config.toml`
-- TLS identity and server state: `${XDG_STATE_HOME:-~/.local/state}/cyime-wayclip/`
-- TLS private key is stored with mode `0600` on Unix.
+默认监听 `0.0.0.0:9876`。如使用 Android 热点，可显式绑定 Linux 热点地址：
 
-Back up these files if you need to preserve the server identity across reinstalls. Treat them as sensitive.
+```sh
+cyime-wayclip serve-v2 10.42.0.1:9876
+```
 
-## Troubleshooting
+二维码中的地址必须是 Android 可访问的 Linux 局域网地址。配对 offer 一次性有效且会过期；失败时重新启动服务并扫描新二维码。
+
+## 数据和身份持久化
+
+- 配置：`${XDG_CONFIG_HOME:-~/.config}/cyime-wayclip/config.toml`
+- TLS 证书和私钥：`${XDG_STATE_HOME:-~/.local/state}/cyime-wayclip/`
+- 服务端身份：配置中的 `server_id`
+- Unix 系统上的 TLS 私钥权限为 `0600`
+
+这些文件决定已配对服务的身份。迁移或重装时请一并备份，并当作敏感数据保护。
+
+## 故障排查
 
 ```sh
 cyime-wayclip doctor
 cyime-wayclip service status
 journalctl --user -u cyime-wayclip.service -e
+ss -ltn | grep 9876
 ```
 
-If pairing fails, regenerate the QR code; pairing offers are single-use and expire. Ensure the phone and PC are on the same Wi-Fi, the PC address printed in the QR is reachable, and TCP port 9876 is allowed by the firewall.
+常见问题：
 
-## Development
+- **二维码过期或配对失败**：配对 offer 已消费或过期，重新启动 `serve-v2`；
+- **连接超时**：检查手机和 Linux 是否在同一 Wi-Fi、二维码地址是否正确，以及防火墙是否允许 TCP 9876；
+- **已连接但不同步**：确认 Linux 在 Wayland 会话中，运行 `doctor` 检查 clipboard data-control 能力；
+- **服务启动后立即退出**：查看 `journalctl --user`，确认 user systemd、Wayland 环境变量和权限可用。
+
+## 开发与验证
 
 ```sh
 cargo fmt --all -- --check
@@ -106,8 +143,10 @@ cargo test --all-features
 cargo clippy --all-features --all-targets -- -D warnings
 ```
 
-CI runs these checks on every push and pull request. Pushing a `v*` tag builds a Linux x86_64 release artifact.
+GitHub Actions 会在 push 和 pull request 时执行检查；推送 `v*` 标签会自动构建 Linux x86_64 发布包。
 
-## License
+## 版本与许可证
 
-MIT
+当前版本：`0.1.0`。
+
+本项目采用 MIT License。Android 客户端 CyIME 使用其仓库声明的许可证；两者是独立项目，请分别遵守对应许可证。
