@@ -1,4 +1,6 @@
-use cyime_wayclip::{clipboard::UnavailableProvider, config::Config};
+#[cfg(not(feature = "wayland"))]
+use cyime_wayclip::clipboard::UnavailableProvider;
+use cyime_wayclip::config::Config;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
