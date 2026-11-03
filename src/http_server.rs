@@ -12,7 +12,21 @@ fn vlog(level: u8, msg: impl std::fmt::Display) {
         .unwrap_or(0)
         >= level
     {
-        eprintln!("[v{level}] {msg}");
+        {
+            let line = format!("[v{level}] {msg}");
+            eprintln!("{line}");
+            println!("{line}");
+            if let Some(path) = std::env::var_os("CYIME_LOG_FILE") {
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    use std::io::Write;
+                    let _ = writeln!(f, "{line}");
+                }
+            }
+        }
     }
 }
 pub fn serve_v1(addr: &str, mut state: Server<()>, pairing_code: &str) -> std::io::Result<()> {

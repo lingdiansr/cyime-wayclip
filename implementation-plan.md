@@ -252,3 +252,5 @@ Build with `cargo run --features wayland -- serve-v2 192.168.1.10:9876`. The com
 `serve-v2` defaults to `0.0.0.0:9876`, so one TCP listener accepts connections on every IPv4 interface (including the Android hotspot interface); QR endpoints are discovered separately and may list up to eight reachable addresses. Passing an explicit host binds only that interface. IPv6 addresses are discovered when available, but the current endpoint formatter is intended primarily for IPv4 hotspot LANs; use an explicit IPv4 host for Android hotspot compatibility.
 
 CLI verbosity: pass `-v`, `-vv`, or `-vvv` to set `CYIME_VERBOSITY` (1–3) for service diagnostics. Existing `RUST_LOG` remains supported by dependencies.
+
+Logging: `-v/-vv/-vvv` controls diagnostics emitted to stderr/stdout. Set `CYIME_LOG_FILE=/path/to/cyime-wayclip.log` for an additional append-only file sink; absent this variable no file is created. Prefer a user-owned XDG state path (`$XDG_STATE_HOME/cyime-wayclip/cyime-wayclip.log` or `$HOME/.local/state/cyime-wayclip/cyime-wayclip.log`) and restrict permissions to the user.
