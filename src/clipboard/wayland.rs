@@ -190,11 +190,24 @@ pub fn copy_text(text: &str) -> Result<(), String> {
 
 #[cfg(feature = "wayland")]
 pub fn paste_text() -> Result<String, String> {
-    use wl_clipboard_rs::paste::{get_contents, ClipboardType, MimeType, Seat};
-    let (mut pipe, _) = get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Text)
-        .map_err(|e| e.to_string())?;
+    paste_text_optional()?.ok_or_else(|| "No suitable type of content copied".into())
+}
+
+#[cfg(feature = "wayland")]
+pub fn paste_text_optional() -> Result<Option<String>, String> {
+    use wl_clipboard_rs::paste::{get_contents, ClipboardType, Error, MimeType, Seat};
+    let (pipe, _) = match get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Text) {
+        Ok(contents) => contents,
+        Err(Error::ClipboardEmpty | Error::NoMimeType | Error::NoSeats) => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
     use std::io::Read;
     let mut s = String::new();
-    pipe.read_to_string(&mut s).map_err(|e| e.to_string())?;
-    Ok(s)
+    pipe.take((crate::protocol::MAX_TEXT_BYTES + 1) as u64)
+        .read_to_string(&mut s)
+        .map_err(|e| e.to_string())?;
+    if s.len() > crate::protocol::MAX_TEXT_BYTES {
+        return Ok(None);
+    }
+    Ok(Some(s))
 }

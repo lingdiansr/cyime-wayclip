@@ -7,6 +7,10 @@ pub mod server;
 pub mod state;
 pub mod tls;
 
-pub mod peers;
 pub mod discovery;
+pub mod peers;
+mod sync_runtime;
+
+mod clock_store;
+
 pub mod mesh;

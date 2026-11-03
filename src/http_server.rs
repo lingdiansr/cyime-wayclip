@@ -1,10 +1,8 @@
-use crate::protocol::clipboard_wire::{parse_clipboard_body, ClipboardRequestError};
 use crate::protocol::valid_basic;
 use crate::{
     protocol::{GetResult, PutResult},
     server::Server,
 };
-use sha2::Digest;
 use std::io::Read;
 fn vlog(level: u8, msg: impl std::fmt::Display) {
     crate::logging::log(level, msg);
@@ -46,17 +44,67 @@ pub fn serve_v1(addr: &str, mut state: Server<()>, pairing_code: &str) -> std::i
         if let Some(e) = etag {
             r.add_header(tiny_http::Header::from_bytes(&b"ETag"[..], e.as_bytes()).unwrap());
         }
-        req.respond(r)?;
+        respond(req, r)?;
     }
     Ok(())
 }
 
 pub fn serve_v2_tls(
     addr: &str,
-    _state: Server<()>,
+    state: Server<()>,
     identity: &crate::tls::Identity,
     pairing: &mut crate::protocol::PairingService,
 ) -> std::io::Result<()> {
+    let directory = crate::config::state_dir()?;
+    crate::config::ensure_private_directory(&directory)?;
+    let devices =
+        crate::protocol::devices::DeviceRegistry::open(Some(directory.join("devices.json")))?;
+    let peers = crate::peers::PeerManager::open(Some(directory.join("peers.json")))?;
+    let runtime = crate::sync_runtime::SyncRuntime::persistent(
+        state.config.clone(),
+        crate::config::Config::path(),
+        peers,
+        Box::new(read_clipboard),
+        Box::new(write_clipboard),
+        directory.join("clock.json"),
+    )?;
+    let nearby_dir = directory.join("nearby");
+    let nearby = crate::discovery::Nearby::open(Some(nearby_dir), identity.fingerprint.clone())?;
+    let port = addr
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse::<u16>().ok())
+        .unwrap_or(9876);
+    runtime.configure_host(port, identity.fingerprint.clone());
+    let bound: std::net::SocketAddr = addr.parse().map_err(std::io::Error::other)?;
+    let addresses = if_addrs::get_if_addrs()?
+        .into_iter()
+        .map(|a| a.ip())
+        .filter(|ip| crate::peers::is_lan(*ip) && !ip.is_loopback())
+        .filter(|ip| {
+            if bound.ip().is_unspecified() {
+                ip.is_ipv4() == bound.is_ipv4()
+            } else {
+                *ip == bound.ip()
+            }
+        })
+        .collect::<Vec<_>>();
+    let _discovery = if state.config.nearby_enabled {
+        match crate::discovery::Discovery::advertise(
+            &state.config.server_id,
+            "CyIME Wayclip",
+            &identity.fingerprint,
+            port,
+            &addresses,
+        ) {
+            Ok(service) => Some(service),
+            Err(e) => {
+                eprintln!("nearby discovery unavailable: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     vlog(1, format!("starting HTTPS listener on {addr}"));
     let server = tiny_http::Server::https(
         addr,
@@ -66,21 +114,23 @@ pub fn serve_v2_tls(
         },
     )
     .map_err(std::io::Error::other)?;
-    serve_v2_requests(
+    runtime.start_monitor(Some(directory.join("devices.json")));
+    serve_requests(
         server.incoming_requests(),
         pairing,
-        read_clipboard,
-        write_clipboard,
+        runtime,
+        devices,
+        Some(directory.join("devices.json")),
+        nearby,
+        cfg!(feature = "wayland"),
     )
 }
-
-fn read_clipboard() -> Result<String, String> {
+fn read_clipboard() -> Result<Option<String>, String> {
     #[cfg(feature = "wayland")]
-    return crate::clipboard::wayland::paste_text();
+    return crate::clipboard::wayland::paste_text_optional();
     #[cfg(not(feature = "wayland"))]
     Err("Wayland support is disabled".into())
 }
-
 fn write_clipboard(text: &str) -> Result<(), String> {
     #[cfg(feature = "wayland")]
     return crate::clipboard::wayland::copy_text(text);
@@ -91,398 +141,478 @@ fn write_clipboard(text: &str) -> Result<(), String> {
     }
 }
 
-// Commit the cache and acknowledge a PUT only after the desktop accepted it.
-fn apply_clipboard_put(
-    body: &[u8],
-    clipboard: &mut Option<serde_json::Value>,
-    counter: &mut u64,
-    write: impl FnOnce(&str) -> Result<(), String>,
-) -> Result<serde_json::Value, ClipboardRequestError> {
-    let value = parse_clipboard_body(body)?;
-    let text = value["text"].as_str().expect("validated clipboard text");
-    write(text).map_err(|e| {
-        eprintln!("Wayland clipboard write failed: {e}");
-        ClipboardRequestError {
-            status: 503,
-            reason: "desktop clipboard unavailable",
-        }
-    })?;
-    *counter = counter.saturating_add(1);
-    *clipboard = Some(value.clone());
-    Ok(value)
+// A client disconnect is local to one response, never a reason to stop serving.
+fn respond<R: Read>(
+    req: tiny_http::Request,
+    response: tiny_http::Response<R>,
+) -> std::io::Result<()> {
+    if let Err(error) = req.respond(response) {
+        eprintln!("HTTP response write failed: {error}");
+    }
+    Ok(())
 }
 
-fn serve_v2_requests(
+fn json_response(
+    req: tiny_http::Request,
+    code: u16,
+    value: serde_json::Value,
+) -> std::io::Result<()> {
+    let mut response = tiny_http::Response::from_string(value.to_string()).with_status_code(code);
+    response.add_header(
+        tiny_http::Header::from_bytes("Content-Type", "application/json; charset=utf-8").unwrap(),
+    );
+    respond(req, response)
+}
+fn failure(
+    req: tiny_http::Request,
+    status: u16,
+    config: &crate::config::Config,
+) -> std::io::Result<()> {
+    if status == 403 {
+        json_response(
+            req,
+            status,
+            serde_json::json!({"v":2,"sync_paused":true,"send_enabled":config.send_enabled,"receive_enabled":config.receive_enabled}),
+        )
+    } else {
+        respond(req, tiny_http::Response::empty(status))
+    }
+}
+fn bearer(req: &tiny_http::Request) -> Option<&str> {
+    req.headers()
+        .iter()
+        .find(|h| h.field.equiv("Authorization"))
+        .and_then(|h| h.value.as_str().strip_prefix("Bearer "))
+        .map(str::trim)
+}
+fn body(req: &mut tiny_http::Request) -> Result<Vec<u8>, u16> {
+    let mut bytes = Vec::new();
+    req.as_reader()
+        .take((crate::protocol::MAX_JSON_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| 400u16)?;
+    if bytes.len() > crate::protocol::MAX_JSON_BYTES {
+        Err(413)
+    } else {
+        Ok(bytes)
+    }
+}
+fn json_body(req: &mut tiny_http::Request) -> Result<serde_json::Value, u16> {
+    serde_json::from_slice(&body(req)?).map_err(|_| 400)
+}
+fn authenticated_body(
+    req: &mut tiny_http::Request,
+    path: &Option<std::path::PathBuf>,
+    devices: &crate::protocol::devices::DeviceRegistry,
+) -> Result<Vec<u8>, u16> {
+    let bytes = body(req)?;
+    let current = if path.is_some() {
+        Some(crate::protocol::devices::DeviceRegistry::open(path.clone()).map_err(|_| 503u16)?)
+    } else {
+        None
+    };
+    let registry = current.as_ref().unwrap_or(devices);
+    if bearer(req).and_then(|t| registry.authenticate(t)).is_none() {
+        return Err(401);
+    }
+    Ok(bytes)
+}
+fn authenticated_json(
+    req: &mut tiny_http::Request,
+    path: &Option<std::path::PathBuf>,
+    devices: &crate::protocol::devices::DeviceRegistry,
+) -> Result<serde_json::Value, u16> {
+    serde_json::from_slice(&authenticated_body(req, path, devices)?).map_err(|_| 400)
+}
+fn client_fields(v: &serde_json::Value) -> Option<(String, String)> {
+    if v["v"] != 2 {
+        return None;
+    }
+    let id = uuid::Uuid::parse_str(v["client_id"].as_str()?)
+        .ok()?
+        .to_string();
+    let name = v["client_name"]
+        .as_str()
+        .or_else(|| v["name"].as_str())
+        .unwrap_or("CyIME device");
+    let name = name.chars().filter(|c| !c.is_control()).take(64).collect();
+    Some((id, name))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serve_requests(
     requests: impl Iterator<Item = tiny_http::Request>,
     pairing: &mut crate::protocol::PairingService,
-    mut read: impl FnMut() -> Result<String, String>,
-    mut write: impl FnMut(&str) -> Result<(), String>,
+    runtime: std::sync::Arc<crate::sync_runtime::SyncRuntime>,
+    mut devices: crate::protocol::devices::DeviceRegistry,
+    device_path: Option<std::path::PathBuf>,
+    mut nearby: crate::discovery::Nearby,
+    push_supported: bool,
 ) -> std::io::Result<()> {
-    let mut token: Option<String> = None;
-    let device_id = uuid::Uuid::new_v4().to_string();
-    let mut counter: u64 = 0;
-    let mut clipboard: Option<serde_json::Value> = None;
+    use serde_json::json;
     for mut req in requests {
-        let path = req.url().to_string();
-        vlog(2, format!("request method={:?} path={path}", req.method()));
-        crate::logging::log(3, format!("v2 request {:?} {}", req.method(), path));
-        if path == "/api/pair" {
-            let mut b = Vec::new();
-            req.as_reader().read_to_end(&mut b)?;
-            let secret = extract_pair_secret(&b);
-            eprintln!("pair request method={:?} path={} content_type={:?} body_len={} body_hash={} secret_len={} secret_hash={}", req.method(), path, req.headers().iter().find(|h| h.field.equiv("Content-Type")).map(|h| h.value.as_str()), b.len(), hex::encode(sha2::Sha256::digest(&b)), secret.len(), hex::encode(sha2::Sha256::digest(secret.as_bytes())));
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let expected_hash = pairing.expected_secret_hash();
-            eprintln!(
-                "pair timing now={} expected_secret_hash={} extracted_hash={}",
-                now,
-                expected_hash,
-                hex::encode(sha2::Sha256::digest(secret.as_bytes()))
-            );
-            let r = pairing.pair(&secret, uuid::Uuid::new_v4().to_string(), now);
-            let (code, body) = match r {
-                Ok(x) => {
-                    eprintln!(
-                        "pair accepted status=201 server_id={} device_id={}",
-                        x.server_id, x.device_id
-                    );
-                    (
-                        {
-                            token = Some(x.access_token.clone());
-                            201
-                        },
-                        serde_json::to_vec(&x).unwrap(),
-                    )
+        let path = req.url().to_owned();
+        let method = req.method().clone();
+        let config = runtime.settings();
+        vlog(2, format!("request method={method:?} path={path}"));
+        // CLI revocation must take effect without restarting the listener.
+        if device_path.is_some() {
+            match crate::protocol::devices::DeviceRegistry::open(device_path.clone()) {
+                Ok(updated) => {
+                    let owners = updated
+                        .list()
+                        .into_iter()
+                        .map(|d| d.device_id)
+                        .collect::<Vec<_>>();
+                    let _ = runtime.peers.retain_owners(&owners);
+                    devices = updated;
                 }
                 Err(e) => {
-                    eprintln!("pair rejected: {e}");
-                    (401, vec![])
+                    eprintln!("credential store unavailable: {e}");
+                    failure(req, 503, &config)?;
+                    continue;
                 }
-            };
-            req.respond(tiny_http::Response::from_data(body).with_status_code(code))?;
-        } else if path == "/api/clipboard" {
-            let auth = req
-                .headers()
-                .iter()
-                .find(|h| h.field.equiv("Authorization"))
-                .and_then(|h| h.value.as_str().strip_prefix("Bearer "))
-                .map(|v| token.as_deref() == Some(v.trim()))
-                .unwrap_or(false);
-            if !auth {
-                req.respond(tiny_http::Response::empty(401))?;
+            }
+        }
+        if path == "/api/pair" {
+            if method != tiny_http::Method::Post {
+                failure(req, 405, &config)?;
                 continue;
             }
-            if req.method() == &tiny_http::Method::Get {
-                if let Ok(text) = read() {
-                    let hash = hex::encode(sha2::Sha256::digest(text.as_bytes()));
-                    let current = serde_json::json!({"type":"text","text":text,"hash":hash,"size":text.len(),"has_data":false,"data_name":null,"source":"cyime-wayland","v":2,"stamp":{"device_id":device_id,"counter":counter}});
-                    clipboard = Some(current);
+            let bytes = match body(&mut req) {
+                Ok(b) => b,
+                Err(code) => {
+                    failure(req, code, &config)?;
+                    continue;
                 }
-                if let Some(v) = clipboard.as_ref() {
-                    let hash = v.get("hash").and_then(|x| x.as_str()).unwrap_or("");
-                    let inm = req
+            };
+            let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+                Ok(v) => v,
+                Err(_) => {
+                    failure(req, 400, &config)?;
+                    continue;
+                }
+            };
+            let (client_id, name) = match client_fields(&value) {
+                Some(fields) => fields,
+                None => {
+                    // Keep the original QR client's secret-only request compatible.
+                    if value.get("v").is_some() {
+                        failure(req, 400, &config)?;
+                        continue;
+                    }
+                    (uuid::Uuid::new_v4().to_string(), "CyIME device".into())
+                }
+            };
+            let secret = value["secret"].as_str().unwrap_or("");
+            let now = crate::sync_runtime::now_ms() as u64 / 1000;
+            if pairing.check_offer(secret, now).is_err() {
+                failure(req, 401, &config)?;
+                continue;
+            }
+            match devices.issue(&client_id, &name) {
+                Ok((device_id, access_token)) => {
+                    let _ = runtime.peers.remove_owner(&device_id);
+                    pairing.consume_offer();
+                    json_response(
+                        req,
+                        201,
+                        json!({"v":2,"server_id":config.server_id,"server_name":"CyIME Wayclip","device_id":device_id,"access_token":access_token}),
+                    )?;
+                }
+                Err(e) => {
+                    eprintln!("persist pairing failed: {e}");
+                    failure(req, 503, &config)?;
+                }
+            }
+            continue;
+        }
+        if path == "/api/pair/nearby" {
+            if method != tiny_http::Method::Post {
+                failure(req, 405, &config)?;
+                continue;
+            }
+            if !config.nearby_enabled {
+                failure(req, 403, &config)?;
+                continue;
+            }
+            let value = match json_body(&mut req) {
+                Ok(v) => v,
+                Err(code) => {
+                    failure(req, code, &config)?;
+                    continue;
+                }
+            };
+            let remote = match req.remote_addr() {
+                Some(a) => a.ip(),
+                None => {
+                    failure(req, 400, &config)?;
+                    continue;
+                }
+            };
+            match nearby.request(&value, remote, crate::sync_runtime::now_ms() as u64) {
+                Ok(crate::discovery::NearbyResult::Pending {
+                    request_id,
+                    code,
+                    name,
+                }) => {
+                    eprintln!("nearby pairing pending id={request_id} name={name:?} code={code}; approve locally after comparing codes");
+                    json_response(req, 202, json!({"v":2,"pending":true}))?;
+                }
+                Ok(crate::discovery::NearbyResult::Approved {
+                    request_id,
+                    client_id,
+                    name,
+                }) => match devices.issue(&client_id, &name) {
+                    Ok((device_id, access_token)) => {
+                        let _ = runtime.peers.remove_owner(&device_id);
+                        if let Err(e) = nearby.complete(&request_id) {
+                            eprintln!("nearby completion failed: {e}");
+                            failure(req, 503, &config)?;
+                            continue;
+                        }
+                        json_response(
+                            req,
+                            201,
+                            json!({"v":2,"server_id":config.server_id,"server_name":"CyIME Wayclip","device_id":device_id,"access_token":access_token}),
+                        )?;
+                    }
+                    Err(e) => {
+                        eprintln!("persist nearby pairing failed: {e}");
+                        failure(req, 503, &config)?;
+                    }
+                },
+                Err(_) => failure(req, 403, &config)?,
+            }
+            continue;
+        }
+        let owner = match bearer(&req).and_then(|token| devices.authenticate(token)) {
+            Some(id) => id,
+            None => {
+                failure(req, 401, &config)?;
+                continue;
+            }
+        };
+        if path == "/api/status" {
+            if method != tiny_http::Method::Get {
+                failure(req, 405, &config)?;
+                continue;
+            }
+            let back = runtime.peers.back(&owner);
+            let pin = back.as_ref().map(|p| p.fingerprint.clone());
+            let port = back.as_ref().and_then(|p| {
+                p.origin
+                    .rsplit_once(':')
+                    .and_then(|(_, p)| p.parse::<u16>().ok())
+            });
+            json_response(
+                req,
+                200,
+                json!({"v":2,"connected":true,"device_id":owner,"send_enabled":config.send_enabled,"receive_enabled":config.receive_enabled,"push":push_supported && config.send_enabled,"push_pin":pin,"push_port":port,"push_failed":runtime.peers.failed(&owner)}),
+            )?;
+        } else if path == "/api/clipboard" && method == tiny_http::Method::Get {
+            match runtime.get() {
+                Ok(Some(value)) => {
+                    let hash = value["hash"].as_str().unwrap();
+                    let matches = req
                         .headers()
                         .iter()
                         .find(|h| h.field.equiv("If-None-Match"))
-                        .map(|h| {
+                        .is_some_and(|h| {
                             h.value
                                 .as_str()
-                                .trim_matches('"')
                                 .split(',')
-                                .any(|x| x.trim().trim_matches('"') == hash)
+                                .any(|v| v.trim().trim_matches('"') == hash)
                         });
-                    if inm == Some(true) {
-                        let mut resp = tiny_http::Response::empty(304);
-                        resp.add_header(
-                            tiny_http::Header::from_bytes(&b"ETag"[..], hash.as_bytes()).unwrap(),
-                        );
-                        req.respond(resp)?;
+                    let mut response = if matches {
+                        tiny_http::Response::empty(304).boxed()
                     } else {
-                        let mut resp =
-                            tiny_http::Response::from_string(v.to_string()).with_status_code(200);
-                        resp.add_header(
-                            tiny_http::Header::from_bytes(&b"ETag"[..], hash.as_bytes()).unwrap(),
-                        );
-                        req.respond(resp)?;
-                    }
-                } else {
-                    req.respond(tiny_http::Response::empty(204))?;
+                        tiny_http::Response::from_string(value.to_string())
+                            .with_status_code(200)
+                            .boxed()
+                    };
+                    response.add_header(
+                        tiny_http::Header::from_bytes("ETag", format!("\"{hash}\"")).unwrap(),
+                    );
+                    response.add_header(
+                        tiny_http::Header::from_bytes(
+                            "Content-Type",
+                            "application/json; charset=utf-8",
+                        )
+                        .unwrap(),
+                    );
+                    respond(req, response)?;
                 }
-            } else if req.method() == &tiny_http::Method::Put {
-                let mut body = Vec::new();
-                req.as_reader()
-                    .take((crate::protocol::MAX_JSON_BYTES + 1) as u64)
-                    .read_to_end(&mut body)?;
-                let v = match apply_clipboard_put(&body, &mut clipboard, &mut counter, &mut write) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        eprintln!(
-                            "clipboard PUT rejected status={} reason={}",
-                            error.status, error.reason
-                        );
-                        // Android parses any nonempty response as JSON before checking
-                        // its HTTP status. Keep errors empty so TransferFailure retains
-                        // the actual 400/413/503 rather than becoming a JSONException.
-                        req.respond(tiny_http::Response::empty(error.status))?;
+                Ok(None) => {
+                    respond(req, tiny_http::Response::empty(204))?;
+                }
+                Err(e) => failure(req, e.status, &config)?,
+            }
+        } else if path == "/api/clipboard" && method == tiny_http::Method::Put {
+            let bytes = match authenticated_body(&mut req, &device_path, &devices) {
+                Ok(b) => b,
+                Err(code) => {
+                    failure(req, code, &config)?;
+                    continue;
+                }
+            };
+            match runtime.put(&bytes, &owner) {
+                Ok(value) => {
+                    let mut response = tiny_http::Response::from_string(value.to_string());
+                    response.add_header(
+                        tiny_http::Header::from_bytes(
+                            "Content-Type",
+                            "application/json; charset=utf-8",
+                        )
+                        .unwrap(),
+                    );
+                    response.add_header(
+                        tiny_http::Header::from_bytes(
+                            "ETag",
+                            format!("\"{}\"", value["hash"].as_str().unwrap()),
+                        )
+                        .unwrap(),
+                    );
+                    respond(req, response)?;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "clipboard PUT rejected status={} reason={}",
+                        e.status, e.reason
+                    );
+                    failure(req, e.status, &config)?;
+                }
+            }
+        } else if path == "/api/peer" && method == tiny_http::Method::Post {
+            let value = match authenticated_json(&mut req, &device_path, &devices) {
+                Ok(v) => v,
+                Err(code) => {
+                    failure(req, code, &config)?;
+                    continue;
+                }
+            };
+            let remote = match req.remote_addr() {
+                Some(a) => a.ip(),
+                None => {
+                    failure(req, 400, &config)?;
+                    continue;
+                }
+            };
+            match crate::peers::Peer::registration(&value, remote) {
+                Ok(peer) => {
+                    if peer.id == config.server_id {
+                        failure(req, 400, &config)?;
                         continue;
                     }
-                };
-                vlog(
-                    1,
-                    format!("clipboard PUT applied status=200 bytes={}", v["size"]),
-                );
-                let mut resp =
-                    tiny_http::Response::from_string(v.to_string()).with_status_code(200);
-                if let Some(h) = v.get("hash").and_then(|x| x.as_str()) {
-                    resp.add_header(
-                        tiny_http::Header::from_bytes(&b"ETag"[..], h.as_bytes()).unwrap(),
-                    );
+                    match runtime.peers.register(&owner, peer) {
+                        Ok(()) => {
+                            runtime.mesh.trigger();
+                            if let Ok(Some(v)) = runtime.get() {
+                                runtime.peers.publish(v);
+                            }
+                            json_response(
+                                req,
+                                200,
+                                json!({"v":2,"push":push_supported && config.send_enabled}),
+                            )?;
+                        }
+                        Err(_) => failure(req, 409, &config)?,
+                    }
                 }
-                req.respond(resp)?;
-            } else {
-                req.respond(tiny_http::Response::empty(405))?;
+                Err(_) => failure(req, 400, &config)?,
             }
-        } else if path == "/api/peer" || path == "/api/grant" || path == "/api/introduce" {
-            let auth = req
-                .headers()
-                .iter()
-                .find(|h| h.field.equiv("Authorization"))
-                .and_then(|h| h.value.as_str().strip_prefix("Bearer "))
-                .map(|v| token.as_deref() == Some(v.trim()))
-                .unwrap_or(false);
-            if !auth {
-                req.respond(tiny_http::Response::empty(401))?;
-                continue;
-            }
-            let mut b = Vec::new();
-            req.as_reader().read_to_end(&mut b)?;
-            let body = if path == "/api/grant" {
-                serde_json::json!({"v":2,"token":token.clone().unwrap_or_default()}).to_string()
-            } else {
-                serde_json::json!({"v":2,"push":false}).to_string()
+        } else if path == "/api/grant" && method == tiny_http::Method::Post {
+            let value = match authenticated_json(&mut req, &device_path, &devices) {
+                Ok(v) => v,
+                Err(code) => {
+                    failure(req, code, &config)?;
+                    continue;
+                }
             };
-            req.respond(tiny_http::Response::from_string(body).with_status_code(200))?;
-        } else if path == "/api/status" {
-            let auth = req
-                .headers()
-                .iter()
-                .find(|h| h.field.equiv("Authorization"))
-                .and_then(|h| h.value.as_str().strip_prefix("Bearer "))
-                .map(|v| token.as_deref() == Some(v.trim()))
-                .unwrap_or(false);
-            if !auth {
-                req.respond(tiny_http::Response::empty(401))?;
+            if !config.allow_introductions {
+                failure(req, 403, &config)?;
                 continue;
             }
-            req.respond(tiny_http::Response::from_string(r#"{"v":2,"connected":true,"send_enabled":true,"receive_enabled":true,"push":false,"push_pin":null,"push_port":null,"push_failed":false}"#).with_status_code(200))?;
+            let (client, name) = match client_fields(&value) {
+                Some(v) => v,
+                None => {
+                    failure(req, 400, &config)?;
+                    continue;
+                }
+            };
+            if client == config.server_id {
+                failure(req, 400, &config)?;
+                continue;
+            }
+            match devices.grant(bearer(&req).unwrap(), &client, &name) {
+                Ok((_, token)) => json_response(req, 200, json!({"v":2,"token":token}))?,
+                Err(_) => failure(req, 409, &config)?,
+            }
+        } else if path == "/api/introduce" && method == tiny_http::Method::Post {
+            let value = match authenticated_json(&mut req, &device_path, &devices) {
+                Ok(v) => v,
+                Err(code) => {
+                    failure(req, code, &config)?;
+                    continue;
+                }
+            };
+            if !config.allow_introductions {
+                failure(req, 403, &config)?;
+                continue;
+            }
+            match crate::peers::Peer::introduction(&value) {
+                Ok(peer) => {
+                    if peer.id == config.server_id {
+                        failure(req, 400, &config)?;
+                        continue;
+                    }
+                    // A grant is scoped to its introducer, never a rotation of a direct pairing.
+                    let (peer_owner, token) =
+                        match devices.grant(bearer(&req).unwrap(), &peer.id, &peer.name) {
+                            Ok(g) => g,
+                            Err(e) => {
+                                eprintln!("persist introduced grant failed: {e}");
+                                failure(req, 503, &config)?;
+                                continue;
+                            }
+                        };
+                    let registration = match runtime.registration(token) {
+                        Some(v) => v,
+                        None => {
+                            failure(req, 503, &config)?;
+                            continue;
+                        }
+                    };
+                    match runtime.peers.register(&peer_owner, peer) {
+                        Ok(()) => {
+                            // Do not block this listener: two introducing peers can register
+                            // callbacks with each other at exactly the same time.
+                            match runtime.peers.register_back(&peer_owner, registration) {
+                                Ok(()) => {
+                                    if let Ok(Some(v)) = runtime.get() {
+                                        runtime.peers.publish(v);
+                                    }
+                                    json_response(req, 200, json!({"v":2}))?;
+                                }
+                                Err(_) => failure(req, 503, &config)?,
+                            }
+                        }
+                        Err(_) => failure(req, 409, &config)?,
+                    }
+                }
+                Err(_) => failure(req, 400, &config)?,
+            }
         } else {
-            req.respond(tiny_http::Response::empty(404))?;
+            failure(
+                req,
+                if path == "/api/clipboard" { 405 } else { 404 },
+                &config,
+            )?;
         }
     }
     Ok(())
 }
 
-fn extract_pair_secret(b: &[u8]) -> String {
-    let raw = String::from_utf8_lossy(b).trim().to_string();
-    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(b) {
-        if let Some(s) = v.get("secret").and_then(|x| x.as_str()) {
-            return s.to_string();
-        }
-    }
-    for part in raw.split('&') {
-        if let Some(v) = part.strip_prefix("secret=") {
-            return v.to_string();
-        }
-    }
-    raw
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::protocol::{ClipboardProfile, PairOffer, PairingService};
-    use serde_json::{json, Value};
-    use std::io::Write;
-    use std::net::TcpStream;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-
-    fn android_profile(text: &str) -> Value {
-        let mut value = serde_json::to_value(ClipboardProfile::text(text).unwrap()).unwrap();
-        value["source"] = json!("CyIME-Android");
-        value["stamp"] = json!(1_793_713_000_000_i64);
-        value
-    }
-
-    #[test]
-    fn failed_write_does_not_acknowledge_or_replace_cached_clipboard() {
-        let old = android_profile("desktop");
-        let incoming = android_profile("phone 手机");
-        let mut clipboard = Some(old.clone());
-        let mut counter = 4;
-        let error = apply_clipboard_put(
-            &serde_json::to_vec(&incoming).unwrap(),
-            &mut clipboard,
-            &mut counter,
-            |_| Err("test unavailable provider".into()),
-        )
-        .unwrap_err();
-        assert_eq!(error.status, 503);
-        assert_eq!(clipboard, Some(old));
-        assert_eq!(counter, 4);
-    }
-
-    #[test]
-    fn successful_write_preserves_android_timestamp_and_profile() {
-        let incoming = android_profile("手机复制\r\n🌍");
-        let mut clipboard = None;
-        let mut counter = 0;
-        let result = apply_clipboard_put(
-            &serde_json::to_vec(&incoming).unwrap(),
-            &mut clipboard,
-            &mut counter,
-            |text| {
-                assert_eq!(text, "手机复制\r\n🌍");
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(result, incoming);
-        assert_eq!(clipboard, Some(incoming));
-        assert_eq!(counter, 1);
-    }
-
-    #[test]
-    fn invalid_request_never_calls_desktop_writer() {
-        let mut clipboard = None;
-        let mut counter = 0;
-        let error = apply_clipboard_put(b"{", &mut clipboard, &mut counter, |_| {
-            panic!("invalid request must not change desktop clipboard")
-        })
-        .unwrap_err();
-        assert_eq!(error.status, 400);
-        assert_eq!(clipboard, None);
-        assert_eq!(counter, 0);
-    }
-
-    // Exercise the same request loop as TLS, without an actual desktop or phone.
-    // In particular, malformed JSON must not terminate subsequent polling/PUTs.
-    #[test]
-    fn android_upload_over_http_survives_bad_json_and_enforces_auth() {
-        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-        let addr = server.server_addr().to_ip().unwrap();
-        let desktop = Arc::new(Mutex::new(None::<String>));
-        let observed = Arc::clone(&desktop);
-        let worker = std::thread::spawn(move || {
-            let secret = crate::protocol::encode_secret(&[7; 32]).unwrap();
-            let mut pairing = PairingService::new("test-server", "test");
-            pairing.set_offer(PairOffer {
-                v: 2,
-                server_id: "test-server".into(),
-                name: "test".into(),
-                certificate_sha256: "a".repeat(64),
-                pairing_id: "test-offer".into(),
-                secret,
-                endpoints: vec![format!("https://{addr}")],
-                expires_at: u64::MAX,
-            });
-            let read_desktop = Arc::clone(&desktop);
-            serve_v2_requests(
-                server.incoming_requests().take(10),
-                &mut pairing,
-                move || read_desktop.lock().unwrap().clone().ok_or("empty".into()),
-                move |text| {
-                    if text == "WRITE_FAIL" {
-                        return Err("test unavailable clipboard".into());
-                    }
-                    *desktop.lock().unwrap() = Some(text.to_owned());
-                    Ok(())
-                },
-            )
-            .unwrap();
-        });
-        let exchange = |method: &str, path: &str, token: &str, body: &[u8]| {
-            let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            write!(stream, "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n", body.len()).unwrap();
-            stream.write_all(body).unwrap();
-            let mut response = String::new();
-            stream.read_to_string(&mut response).unwrap();
-            let (headers, body) = response.split_once("\r\n\r\n").unwrap();
-            let code = headers
-                .split_whitespace()
-                .nth(1)
-                .unwrap()
-                .parse::<u16>()
-                .unwrap();
-            (code, body.to_owned())
-        };
-        let secret = crate::protocol::encode_secret(&[7; 32]).unwrap();
-        let (code, response) = exchange(
-            "POST",
-            "/api/pair",
-            "",
-            json!({"secret": secret}).to_string().as_bytes(),
-        );
-        assert_eq!(code, 201);
-        let pair: Value = serde_json::from_str(&response).unwrap();
-        let token = pair["access_token"].as_str().unwrap();
-        assert_eq!(exchange("GET", "/api/status", token, b"").0, 200);
-        assert_eq!(
-            exchange("PUT", "/api/clipboard", token, b"{"),
-            (400, String::new())
-        );
-        let phone = android_profile("PHONE_TO_PC 手机🌍");
-        let body = serde_json::to_vec(&phone).unwrap();
-        assert_eq!(exchange("PUT", "/api/clipboard", "wrong", &body).0, 401);
-        let (code, response) = exchange("PUT", "/api/clipboard", token, &body);
-        assert_eq!(code, 200);
-        assert_eq!(serde_json::from_str::<Value>(&response).unwrap(), phone);
-        assert_eq!(
-            observed.lock().unwrap().as_deref(),
-            Some("PHONE_TO_PC 手机🌍")
-        );
-        let (code, response) = exchange("GET", "/api/clipboard", token, b"");
-        assert_eq!(code, 200);
-        assert_eq!(
-            serde_json::from_str::<Value>(&response).unwrap()["hash"],
-            phone["hash"]
-        );
-        let mut legacy = android_profile("legacy object stamp");
-        legacy["v"] = json!(2);
-        legacy["stamp"] = json!({"device_id": "test", "counter": 3});
-        assert_eq!(
-            exchange(
-                "PUT",
-                "/api/clipboard",
-                token,
-                legacy.to_string().as_bytes()
-            )
-            .0,
-            200
-        );
-        assert_eq!(exchange("GET", "/api/status", token, b"").0, 200);
-        let rejected = android_profile("WRITE_FAIL");
-        assert_eq!(
-            exchange(
-                "PUT",
-                "/api/clipboard",
-                token,
-                rejected.to_string().as_bytes()
-            ),
-            (503, String::new())
-        );
-        let (code, response) = exchange("GET", "/api/clipboard", token, b"");
-        assert_eq!(code, 200);
-        assert_eq!(
-            serde_json::from_str::<Value>(&response).unwrap()["hash"],
-            legacy["hash"]
-        );
-        worker.join().unwrap();
-    }
-}
+#[path = "http_server_tests.rs"]
+mod tests;

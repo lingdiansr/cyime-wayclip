@@ -334,11 +334,12 @@ impl Nearby {
 }
 
 pub fn default_directory() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join(format!("cyime-wayclip-{}", uid())))
-        .join("cyime-nearby")
+    // The CLI and HTTPS listener must inspect the same private approval files.
+    crate::config::state_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join(format!("cyime-wayclip-{}", uid())))
+        .join("nearby")
 }
+
 fn uid() -> u32 {
     fs::metadata("/proc/self")
         .expect("Linux procfs required")

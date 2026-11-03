@@ -7,7 +7,7 @@ fn main() {
         .iter()
         .skip(1)
         .filter(|a| matches!(a.as_str(), "-v" | "-vv" | "-vvv"))
-        .map(|a| a.len())
+        .map(|a| a.len() - 1)
         .max()
         .unwrap_or(0);
     cyime_wayclip::logging::set_verbosity(verbosity);
@@ -17,12 +17,12 @@ fn main() {
     {
         cyime_wayclip::logging::set_show_content(true);
     }
-    let command_index = args.iter().position(|a| {
-        matches!(
-            a.as_str(),
-            "doctor" | "status" | "run" | "serve" | "serve-v2" | "pair" | "help" | "--help" | "-h"
-        )
-    });
+    let command_index = args
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, a)| !a.starts_with('-') || matches!(a.as_str(), "--help" | "-h"))
+        .map(|(i, _)| i);
     let command = command_index.and_then(|i| args.get(i)).map(String::as_str);
     let positional = command_index
         .and_then(|i| args.get(i + 1))
@@ -33,10 +33,13 @@ fn main() {
         Some("status") => status(),
         Some("run") | None => run(),
         Some("serve") => serve_v2(positional),
+        Some("serve-v1") => serve(positional),
         Some("serve-v2") => serve_v2(positional),
         Some("pair") => pair(),
-        Some("config") if args.get(2).map(String::as_str) == Some("init") => config_init(),
-        Some("service") => service(args.get(2).map(String::as_str)),
+        Some("config") => config_command(&args[command_index.unwrap() + 1..]),
+        Some("devices") => cli_result(devices_command(&args[command_index.unwrap() + 1..])),
+        Some("nearby") => cli_result(nearby_command(&args[command_index.unwrap() + 1..])),
+        Some("service") => service(positional),
         Some("help") | Some("--help") | Some("-h") => help(),
         Some(x) => {
             eprintln!("unknown command: {x}");
@@ -51,8 +54,15 @@ fn help() {
     println!("  doctor               Show config path and Wayland capability");
     println!("  status               Alias for doctor");
     println!("  config init          Create the default config file");
+    println!("  config set KEY VALUE Set a synchronization option atomically");
+    println!("  devices list         List paired devices (never prints tokens)");
+    println!("  devices revoke ID    Revoke a device and delegated credentials");
+    println!("  nearby list          Show pending requests and comparison codes");
+    println!("  nearby approve ID    Approve after comparing the phone code");
+    println!("  nearby reject ID     Reject a pending request");
+    println!("  serve-v1 [ADDRESS]   Start the explicitly enabled legacy HTTP server");
     println!("  pair                 Print a v1 pairing code and origin");
-    println!("  serve [ADDRESS]      Start the opt-in v1 HTTP server");
+    println!("  serve [ADDRESS]      Alias for serve-v2");
     println!("  serve-v2 [ADDRESS]   Start the HTTPS QR pairing server");
     println!("  service install      Install the systemd user service");
     println!("  service uninstall    Remove the systemd user service");
@@ -230,32 +240,79 @@ fn pair() {
 
 fn serve_v2(bind: Option<&str>) {
     let addr = bind.unwrap_or("0.0.0.0:9876");
-    let hosts = if addr.starts_with("0.0.0.0:") {
-        discover_lan_hosts()
-    } else {
-        vec![addr.split(':').next().unwrap_or("").into()]
-    };
-    if hosts.is_empty() || hosts.iter().all(|h| h == "127.0.0.1" || h == "localhost") {
-        eprintln!("serve-v2 requires a reachable LAN host");
-        return;
-    }
-    let config = Config::load().unwrap_or_else(|e| {
-        eprintln!("load config: {e}");
-        Config::default()
+    let bind_address: std::net::SocketAddr = addr.parse().unwrap_or_else(|e| {
+        eprintln!("invalid bind address: {e}");
+        std::process::exit(1);
     });
-    let state_dir = std::env::var_os("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state"))
+    let hosts = if bind_address.ip().is_unspecified() {
+        discover_lan_hosts()
+            .into_iter()
+            .filter(|h| {
+                h.parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_ipv4() == bind_address.is_ipv4())
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![bind_address.ip().to_string()]
+    };
+    if bind_address.port() == 0
+        || hosts.is_empty()
+        || hosts.iter().all(|h| {
+            h.parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
         })
-        .map(|p| p.join("cyime-wayclip"))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    {
+        eprintln!("serve-v2 requires a reachable LAN host and nonzero port");
+        std::process::exit(1);
+    }
+    let mut config = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("load config: {e}");
+            std::process::exit(1);
+        }
+    };
+    let state_dir = match cyime_wayclip::config::state_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("state directory: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = cyime_wayclip::config::ensure_private_directory(&state_dir) {
+        eprintln!("state directory: {e}");
+        std::process::exit(1);
+    }
+    // Preserve an existing configured identity; generate and persist once for fresh installs.
+    if !Config::path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .is_some_and(|s| {
+            s.lines().any(|l| {
+                l.split_once('=')
+                    .is_some_and(|(k, _)| k.trim() == "server_id")
+            })
+        })
+    {
+        config.server_id = match cyime_wayclip::tls::stable_server_id() {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("server identity: {e}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = config.save() {
+            eprintln!("persist config: {e}");
+            std::process::exit(1);
+        }
+    }
     match cyime_wayclip::tls::load_or_generate_identity("localhost", &state_dir) {
         Ok(id) => {
             let server_id = config.server_id.clone();
-            let secret_bytes: Vec<u8> = (0..2)
-                .flat_map(|_| *uuid::Uuid::new_v4().as_bytes())
-                .collect();
+            let mut secret_bytes = [0u8; 32];
+            if let Err(e) = getrandom::fill(&mut secret_bytes) {
+                eprintln!("pairing entropy: {e}");
+                std::process::exit(1);
+            }
             let secret = cyime_wayclip::protocol::encode_secret(&secret_bytes).unwrap();
             let offer = cyime_wayclip::protocol::PairOffer {
                 v: 2,
@@ -269,9 +326,11 @@ fn serve_v2(bind: Option<&str>) {
                     .take(8)
                     .map(|h| {
                         format!(
-                            "https://{}:{}",
-                            h,
-                            addr.rsplit_once(':').map(|x| x.1).unwrap_or("9876")
+                            "https://{}",
+                            std::net::SocketAddr::new(
+                                h.parse().expect("validated IP"),
+                                bind_address.port()
+                            )
                         )
                     })
                     .collect(),
@@ -288,14 +347,18 @@ fn serve_v2(bind: Option<&str>) {
             p.set_offer(offer);
             if let Err(e) = cyime_wayclip::http_server::serve_v2_tls(
                 addr,
-                cyime_wayclip::server::Server::new(Config::load().unwrap_or_default()),
+                cyime_wayclip::server::Server::new(config),
                 &id,
                 &mut p,
             ) {
-                eprintln!("serve-v2 error: {e}")
+                eprintln!("serve-v2 error: {e}");
+                std::process::exit(1);
             }
         }
-        Err(e) => eprintln!("TLS identity error: {e}"),
+        Err(e) => {
+            eprintln!("TLS identity error: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -309,7 +372,9 @@ fn discover_lan_hosts() -> Vec<String> {
             }
             let ok = match ip {
                 std::net::IpAddr::V4(v) => v.is_private() || v.is_link_local(),
-                std::net::IpAddr::V6(v) => v.is_unicast_link_local(),
+                // QR endpoint scope IDs are not portable across devices. Use ULA
+                // addresses; mDNS can resolve scoped link-local addresses separately.
+                std::net::IpAddr::V6(v) => v.is_unique_local(),
             };
             if ok && !out.contains(&ip.to_string()) {
                 // Prefer common Android/host hotspot subnets (10.42.0.0/24,
@@ -330,4 +395,109 @@ fn discover_lan_hosts() -> Vec<String> {
         }
     }
     out
+}
+
+fn cli_result(result: std::io::Result<()>) {
+    if let Err(e) = result {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+}
+fn cli_invalid(message: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
+}
+fn config_command(args: &[String]) {
+    if args.first().map(String::as_str) == Some("init") {
+        config_init();
+        return;
+    }
+    cli_result((|| {
+        if args.len() != 3 || args[0] != "set" {
+            return Err(cli_invalid("usage: config init | config set KEY VALUE"));
+        }
+        let mut c = Config::load()?;
+        match args[1].as_str() {
+            "send_enabled" | "receive_enabled" | "nearby_enabled" | "allow_introductions" => {
+                let value = match args[2].as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err(cli_invalid("value must be true or false")),
+                };
+                match args[1].as_str() {
+                    "send_enabled" => c.send_enabled = value,
+                    "receive_enabled" => c.receive_enabled = value,
+                    "nearby_enabled" => c.nearby_enabled = value,
+                    _ => c.allow_introductions = value,
+                }
+            }
+            "max_text_bytes" => {
+                c.max_text_bytes = args[2]
+                    .parse()
+                    .map_err(|_| cli_invalid("invalid byte limit"))?;
+                if c.max_text_bytes == 0
+                    || c.max_text_bytes > cyime_wayclip::protocol::MAX_TEXT_BYTES
+                {
+                    return Err(cli_invalid("byte limit must be 1..=65536"));
+                }
+            }
+            _ => return Err(cli_invalid("unknown configuration key")),
+        }
+        c.save()?;
+        println!(
+            "updated {} (nearby advertisement changes require restart)",
+            args[1]
+        );
+        Ok(())
+    })());
+}
+fn devices_command(args: &[String]) -> std::io::Result<()> {
+    use cyime_wayclip::protocol::devices::DeviceRegistry;
+    let dir = cyime_wayclip::config::state_dir()?;
+    cyime_wayclip::config::ensure_private_directory(&dir)?;
+    let mut devices = DeviceRegistry::open(Some(dir.join("devices.json")))?;
+    match args.first().map(String::as_str).unwrap_or("list") {
+        "list" if args.len() <= 1 => {
+            for d in devices.list() {
+                println!("{}\t{}\t{}", d.device_id, d.name, d.client_id);
+            }
+        }
+        "revoke" if args.len() == 2 => {
+            if !devices.revoke(&args[1])? {
+                return Err(cli_invalid("unknown device ID"));
+            }
+            // Persisted credential revocation is authoritative; the live watcher cancels
+            // callbacks too, even when this best-effort peer-store cleanup fails.
+            match cyime_wayclip::peers::PeerManager::open(Some(dir.join("peers.json"))) {
+                Ok(p) => {
+                    if let Err(e) = p.remove_owner(&args[1]) {
+                        eprintln!("callback cleanup pending: {e}");
+                    }
+                }
+                Err(e) => eprintln!("callback cleanup pending: {e}"),
+            }
+            println!("revoked {}", args[1]);
+        }
+        _ => return Err(cli_invalid("usage: devices list | devices revoke ID")),
+    }
+    Ok(())
+}
+fn nearby_command(args: &[String]) -> std::io::Result<()> {
+    let dir = cyime_wayclip::discovery::default_directory();
+    match args.first().map(String::as_str).unwrap_or("list") {
+        "list" if args.len() <= 1 => {
+            for p in cyime_wayclip::discovery::pending(&dir)? {
+                println!("{}\t{}\t{}\t{}", p.request_id, p.code, p.name, p.source);
+            }
+        }
+        "approve" | "reject" if args.len() == 2 => {
+            cyime_wayclip::discovery::decide(&dir, &args[1], args[0] == "approve")?;
+            println!("{} {}", args[0], args[1]);
+        }
+        _ => {
+            return Err(cli_invalid(
+                "usage: nearby list | nearby approve ID | nearby reject ID",
+            ))
+        }
+    }
+    Ok(())
 }
