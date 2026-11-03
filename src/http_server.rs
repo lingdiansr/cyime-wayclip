@@ -1,5 +1,5 @@
 use crate::{
-    protocol::{get, put, GetResult, PutResult},
+    protocol::{GetResult, PutResult},
     server::Server,
 };
 use std::io::Read;

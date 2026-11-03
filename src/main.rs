@@ -1,5 +1,5 @@
 #[cfg(not(feature = "wayland"))]
-use cyime_wayclip::clipboard::UnavailableProvider;
+use cyime_wayclip::clipboard::{ClipboardProvider, UnavailableProvider};
 use cyime_wayclip::config::Config;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -47,6 +47,8 @@ fn run() {
 }
 
 fn serve(bind: Option<&str>) {
+    #[cfg(not(feature = "wayland"))]
+    let _ = bind;
     #[cfg(feature = "wayland")]
     {
         let mut s = cyime_wayclip::server::Server::<()>::new(Config::default());

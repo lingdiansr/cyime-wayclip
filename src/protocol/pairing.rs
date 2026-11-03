@@ -54,6 +54,7 @@ mod tests {
     }
 }
 
+#[allow(dead_code)]
 pub fn generate_pairing_code() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
