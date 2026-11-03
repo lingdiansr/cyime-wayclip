@@ -171,12 +171,14 @@ pub fn copy_text(text: &str) -> Result<(), String> {
         .clipboard(ClipboardType::Regular)
         .seat(Seat::All)
         .serve_requests(ServeRequests::Unlimited);
-    copy(
-        options,
-        Source::Bytes(text.as_bytes().to_vec().into()),
-        MimeType::Text,
-    )
-    .map_err(|e| e.to_string())
+    options.foreground(true);
+    let prepared = options
+        .prepare_copy(
+            Source::Bytes(text.as_bytes().to_vec().into()),
+            MimeType::Text,
+        )
+        .map_err(|e| e.to_string())?;
+    prepared.serve().map_err(|e| e.to_string())
 }
 #[cfg(feature = "wayland")]
 pub fn paste_text() -> Result<String, String> {
