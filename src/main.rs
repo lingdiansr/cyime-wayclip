@@ -103,7 +103,6 @@ fn serve_v2(bind: Option<&str>) {
         eprintln!("serve-v2 requires a reachable LAN host");
         return;
     }
-    let port = addr.rsplit_once(':').map(|x| x.1).unwrap_or("9876");
     match cyime_wayclip::tls::generate_identity("localhost") {
         Ok(id) => {
             let secret = cyime_wayclip::protocol::encode_secret(&[9; 32]).unwrap();
@@ -147,14 +146,24 @@ fn serve_v2(bind: Option<&str>) {
 }
 
 fn discover_lan_hosts() -> Vec<String> {
-    use std::net::UdpSocket;
-    let mut v = Vec::new();
-    if let Ok(s) = UdpSocket::bind("0.0.0.0:0") {
-        if s.connect("192.0.2.1:9").is_ok() {
-            if let Ok(a) = s.local_addr() {
-                v.push(a.ip().to_string())
+    let mut out = Vec::new();
+    if let Ok(addrs) = if_addrs::get_if_addrs() {
+        for a in addrs {
+            let ip = a.ip();
+            if ip.is_loopback() {
+                continue;
+            }
+            let ok = match ip {
+                std::net::IpAddr::V4(v) => v.is_private() || v.is_link_local(),
+                std::net::IpAddr::V6(v) => v.is_unicast_link_local(),
+            };
+            if ok && !out.contains(&ip.to_string()) {
+                out.push(ip.to_string());
+            }
+            if out.len() >= 8 {
+                break;
             }
         }
     }
-    v
+    out
 }
