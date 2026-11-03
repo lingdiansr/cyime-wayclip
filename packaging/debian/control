@@ -1,0 +1,12 @@
+Source: cyime-wayclip
+Section: utils
+Priority: optional
+Maintainer: CyIME contributors
+Build-Depends: debhelper-compat (= 13), cargo
+Standards-Version: 4.6.0
+
+Package: cyime-wayclip
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Wayland clipboard synchronization for CyIME
+ Secure clipboard synchronization between a Wayland desktop and CyIME.

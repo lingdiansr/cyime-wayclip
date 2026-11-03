@@ -1,0 +1,11 @@
+#!/usr/bin/make -f
+%:
+dh $@
+
+override_dh_auto_build:
+cargo build --release --all-features
+
+override_dh_auto_install:
+install -Dm755 target/release/cyime-wayclip debian/cyime-wayclip/usr/bin/cyime-wayclip
+install -Dm644 packaging/cyime-wayclip.service debian/cyime-wayclip/usr/lib/systemd/user/cyime-wayclip.service
+sed -i 's#@bindir@#/usr/bin#g' debian/cyime-wayclip/usr/lib/systemd/user/cyime-wayclip.service
