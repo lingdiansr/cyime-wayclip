@@ -5,14 +5,11 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let verbosity = args
         .iter()
-        .take(4)
-        .filter(|a| a.as_str().starts_with("-v"))
+        .skip(1)
+        .filter(|a| matches!(a.as_str(), "-v" | "-vv" | "-vvv"))
         .map(|a| a.len())
         .max()
         .unwrap_or(0);
-    if verbosity > 0 {
-        std::env::set_var("CYIME_VERBOSITY", verbosity.to_string());
-    }
     cyime_wayclip::logging::set_verbosity(verbosity);
     if args
         .iter()
@@ -20,23 +17,23 @@ fn main() {
     {
         cyime_wayclip::logging::set_show_content(true);
     }
-    let command = args
-        .iter()
-        .skip(1)
-        .find(|a| !a.starts_with('-'))
+    let command_index = args.iter().position(|a| {
+        matches!(
+            a.as_str(),
+            "doctor" | "status" | "run" | "serve" | "serve-v2" | "pair" | "help" | "--help" | "-h"
+        )
+    });
+    let command = command_index.and_then(|i| args.get(i)).map(String::as_str);
+    let positional = command_index
+        .and_then(|i| args.get(i + 1))
+        .filter(|a| !a.starts_with('-'))
         .map(String::as_str);
-    let positional: Vec<&str> = args
-        .iter()
-        .skip(1)
-        .filter(|a| !a.starts_with("-v"))
-        .map(String::as_str)
-        .collect();
     match command {
         Some("doctor") => doctor(),
         Some("status") => status(),
         Some("run") | None => run(),
-        Some("serve") => serve_v2(positional.get(1).copied()),
-        Some("serve-v2") => serve_v2(positional.get(1).copied()),
+        Some("serve") => serve_v2(positional),
+        Some("serve-v2") => serve_v2(positional),
         Some("pair") => pair(),
         Some("config") if args.get(2).map(String::as_str) == Some("init") => config_init(),
         Some("service") => service(args.get(2).map(String::as_str)),
