@@ -122,7 +122,11 @@ pub fn serve_v2_tls(
                         .find(|h| h.field.equiv("If-None-Match"))
                         .map(|h| h.value.as_str().trim_matches('"'));
                     if inm == Some(hash) {
-                        req.respond(tiny_http::Response::empty(304))?;
+                        let mut resp = tiny_http::Response::empty(304);
+                        resp.add_header(
+                            tiny_http::Header::from_bytes(&b"ETag"[..], hash.as_bytes()).unwrap(),
+                        );
+                        req.respond(resp)?;
                     } else {
                         req.respond(
                             tiny_http::Response::from_string(v.to_string()).with_status_code(200),
@@ -137,7 +141,14 @@ pub fn serve_v2_tls(
                 let v: serde_json::Value = serde_json::from_slice(&b)
                     .map_err(|_| std::io::Error::other("invalid clipboard JSON"))?;
                 clipboard = Some(v.clone());
-                req.respond(tiny_http::Response::from_string(v.to_string()).with_status_code(200))?;
+                let mut resp =
+                    tiny_http::Response::from_string(v.to_string()).with_status_code(200);
+                if let Some(h) = v.get("hash").and_then(|x| x.as_str()) {
+                    resp.add_header(
+                        tiny_http::Header::from_bytes(&b"ETag"[..], h.as_bytes()).unwrap(),
+                    );
+                }
+                req.respond(resp)?;
             } else {
                 req.respond(tiny_http::Response::empty(405))?;
             }
@@ -153,7 +164,7 @@ pub fn serve_v2_tls(
                 req.respond(tiny_http::Response::empty(401))?;
                 continue;
             }
-            req.respond(tiny_http::Response::from_string(r#"{"v":2,"connected":true,"send_enabled":true,"receive_enabled":true,"push":true}"#).with_status_code(200))?;
+            req.respond(tiny_http::Response::from_string(r#"{"v":2,"connected":true,"send_enabled":true,"receive_enabled":true,"push":false,"push_pin":null,"push_port":null,"push_failed":false}"#).with_status_code(200))?;
         } else {
             req.respond(tiny_http::Response::empty(404))?;
         }
