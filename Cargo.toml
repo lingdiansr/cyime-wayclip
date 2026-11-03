@@ -34,3 +34,6 @@ optional = true
 [dependencies.wl-clipboard-rs]
 version = "0.9"
 optional = true
+
+[dependencies.qrcodegen]
+version = "1.8"

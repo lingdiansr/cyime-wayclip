@@ -71,8 +71,23 @@ fn serve(bind: Option<&str>) {
     }
 }
 
+fn print_qr(text: &str) {
+    if let Ok(q) = qrcodegen::QrCode::encode_text(text, qrcodegen::QrCodeEcc::Medium) {
+        for y in 0..q.size() {
+            println!(
+                "{}",
+                (0..q.size())
+                    .map(|x| if q.get_module(x, y) { "██" } else { "  " })
+                    .collect::<String>()
+            );
+        }
+    }
+}
+
 fn pair() {
     let code = cyime_wayclip::protocol::generate_pairing_code();
     println!("pairing_code={code}");
-    println!("v1_uri=http://127.0.0.1:8765 (enter this origin in the Android Lua plugin)");
+    let uri = "http://127.0.0.1:8765";
+    println!("v1_uri={uri} (enter this origin in the Android Lua plugin)");
+    print_qr(uri);
 }
