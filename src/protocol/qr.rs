@@ -123,6 +123,12 @@ pub fn encode_compact_offer(offer: &PairOffer) -> Result<String, OfferError> {
 
 pub fn encode_pair_uri(offer: &PairOffer) -> Result<String, OfferError> {
     let json = serde_json::to_vec(offer).map_err(|_| OfferError::Json)?;
+    if let Ok(c) = encode_compact_offer(offer) {
+        return Ok(format!(
+            "cyime://pair?v=2&c={c}",
+            c = c.trim_start_matches("cyime://pair?v=2&c=")
+        ));
+    }
     Ok(format!(
         "cyime://pair?v=2&data={}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
