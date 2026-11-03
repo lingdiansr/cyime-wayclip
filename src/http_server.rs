@@ -54,8 +54,8 @@ pub fn serve_v2_tls(
     let server = tiny_http::Server::https(
         addr,
         tiny_http::SslConfig {
-            certificate: identity.cert_der.clone(),
-            private_key: identity.key_der.clone(),
+            certificate: identity.cert_pem.clone(),
+            private_key: identity.key_pem.clone(),
         },
     )
     .map_err(std::io::Error::other)?;
