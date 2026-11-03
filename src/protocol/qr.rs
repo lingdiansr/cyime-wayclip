@@ -1,4 +1,5 @@
 use super::{decode_secret, PairingError};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,5 +92,34 @@ mod tests {
     #[test]
     fn reject_expired() {
         assert_eq!(o().validate(20), Err(OfferError::Expiry));
+    }
+}
+
+#[allow(dead_code)]
+pub fn encode_pair_uri(offer: &PairOffer) -> Result<String, OfferError> {
+    let json = serde_json::to_vec(offer).map_err(|_| OfferError::Json)?;
+    Ok(format!(
+        "cyime://pair?v=2&data={}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+    ))
+}
+#[cfg(test)]
+mod uri_tests {
+    use super::*;
+    #[test]
+    fn uri_prefix() {
+        let o = PairOffer {
+            v: 2,
+            server_id: "s".into(),
+            name: "n".into(),
+            certificate_sha256: "a".repeat(64),
+            pairing_id: "p".into(),
+            secret: crate::protocol::encode_secret(&[1; 32]).unwrap(),
+            endpoints: vec!["https://127.0.0.1:1".into()],
+            expires_at: 20,
+        };
+        assert!(encode_pair_uri(&o)
+            .unwrap()
+            .starts_with("cyime://pair?v=2&data="));
     }
 }
