@@ -17,3 +17,10 @@ hex = "0.4"
 [[bin]]
 name = "cyime-wayclip"
 path = "src/main.rs"
+
+[features]
+wayland = ["dep:wayland-client"]
+
+[dependencies.wayland-client]
+version = "0.31"
+optional = true
