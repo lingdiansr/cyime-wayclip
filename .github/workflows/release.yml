@@ -35,6 +35,6 @@ jobs:
           sed "s/^Version:.*/Version: $version/" packaging/rpm.spec > rpmbuild/SPECS/cyime-wayclip.spec
           rpmbuild --define "_topdir $PWD/rpmbuild" -ba rpmbuild/SPECS/cyime-wayclip.spec || true
           find rpmbuild/RPMS -type f -name '*.rpm' -exec cp {} dist/ \; || true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
