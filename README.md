@@ -22,7 +22,7 @@
 - systemd 用户服务模式
 - Linux x86_64 发布包、Debian/RPM 打包元数据
 
-当前版本主要支持**文本**剪贴板。二进制数据、主动推送和完整多设备 mesh 仍在后续计划中。
+当前版本只支持**文本**剪贴板，不支持图片或其它二进制数据。v2 主动推送、附近配对与显式授权的多设备组网见文末说明；不提供 Linux 扫描设备或图形管理界面。
 
 ## 环境要求
 
@@ -140,7 +140,7 @@ ss -ltn | grep 9876
 `stamp={"device_id":"…","counter":1}` 的对象格式兼容。
 显式提供 `v` 时必须为 `2`。服务保留发送方的原始字段，
 不会将手机的时间戳当成逻辑计数器。文本仍需通过 SHA-256、UTF-8 字节数和大小限制校验；
-只有桌面写入成功后才返回 200 和对应的 ETag。
+新内容只有桌面写入成功后才返回 200 和对应的 ETag；重复或过旧的有效内容可幂等确认，旧内容不会覆盖新内容。
 
 ## 开发与验证
 
@@ -179,3 +179,107 @@ cargo clippy --all-features --all-targets -- -D warnings
 Clipboard text is never logged by default. `--show-content` (alias
 `--log-content`) opts into sensitive clipboard diagnostics for local debugging;
 use only on a trusted machine and disable it afterward.
+
+
+## v2 配对、设备管理与同步行为
+
+### 凭据持久化和撤销
+
+v2 使用 HTTPS、证书 SHA-256 指纹固定和每设备 Bearer Token。二维码 offer 一次性消费；
+已配对凭据持久化，正常重启无需重新扫码。设备登记仅保存入站 token 的摘要，
+出站回调 token 则作为敏感凭据保存在本机，默认不写入日志。
+
+```sh
+cyime-wayclip devices list
+cyime-wayclip devices revoke DEVICE_ID
+```
+
+`DEVICE_ID` 取自列表首列，列表不显示 token。撤销同时移除该授权派生的子 grant 和
+介绍的回调；运行中的服务会重载授权并取消相关队列和在途请求。
+同一客户端重新配对会轮换旧 token，并撤销旧的派生授权及回调。
+**使用旧版固定令牌的客户端，升级后需要重新配对。**
+
+状态目录为 `${XDG_STATE_HOME:-~/.local/state}/cyime-wayclip/`，包括 TLS 身份、
+`devices.json`、`peers.json` 和 `clock.json` 等。敏感文件使用 `0600`，私有目录使用
+`0700`；不要放宽权限、共享给其他用户或通过符号链接替换这些状态路径。
+配置中的 `server_id` 和 TLS 私钥共同确定服务身份；`server_id` 在运行期间固定，
+手动更换后需重启并重新配对，不应作为热切换选项。
+
+### 附近配对：手机发现，Linux 本地批准
+
+Linux 通过 mDNS 广播服务器，Android 负责发现并发起附近配对。Linux **不主动扫描**
+其它设备，也没有批准 GUI。手机发起请求后，在 Linux 终端查看并与手机逐字核对比较码：
+
+```sh
+cyime-wayclip nearby list
+cyime-wayclip nearby approve REQUEST_ID
+# 不认识设备或比较码不一致时：
+cyime-wayclip nearby reject REQUEST_ID
+```
+
+`REQUEST_ID` 取自列表首列，列表同时显示比较码、设备名和来源地址。
+未在本地批准时，接口只返回待批准状态（202），不会签发 token；批准后由手机再次请求完成配对。
+不要只凭设备名称批准。
+
+`nearby_enabled` 默认开启，可关闭附近配对和 mDNS 广播：
+
+```sh
+cyime-wayclip config set nearby_enabled false
+```
+
+附近配对入口会随配置更新；**mDNS 广播开关变更需要重启服务**。
+
+### 显式启用自动组网
+
+`allow_introductions` 默认是 `false`，`/api/grant`、`/api/introduce` 默认拒绝。
+仅在信任已配对成员、希望它们互相加入同一文本同步组时开启：
+
+```sh
+cyime-wayclip config set allow_introductions true
+```
+
+启用后，服务会为已配对并登记回调的成员自动执行 grant/introduce，并向被介绍设备
+反向注册回调，使成员无需逐对扫码即可互认；对端也必须支持并允许相应协议。
+这不是无认证的 trust 接口，不会替换已信任设备的证书 pin。
+撤销介绍者会一并撤销由其引入的授权与回调。
+
+所有出站连接均使用真实 HTTPS，精确验证证书指纹和 TLS 握手签名。
+回调登记使用实际请求源 IP 和声明端口，而非信任正文中的地址；介绍地址仅接受
+字面量局域网 IP（私有、链路本地地址，另允许本机 loopback）及端口，拒绝公网、DNS、
+用户信息和 URL 路径，不跟随重定向。不要将服务公开到互联网。
+
+### 暂停、推送和失败回退
+
+```sh
+cyime-wayclip config set send_enabled false
+cyime-wayclip config set receive_enabled false
+# 恢复对应方向时将 false 改为 true
+```
+
+发送暂停时，`GET /api/clipboard` 实际返回 403；接收暂停时，
+`PUT /api/clipboard` 实际返回 403，响应携带 `sync_paused` 和两个方向的状态，
+不是只改变界面提示。发送暂停会丢弃待推内容并取消在途请求，恢复不会重放已取消内容；
+若反向互认注册在暂停时被取消，需要重新介绍设备。
+配置通常热载，解析或读取失败时会安全暂停两个同步方向，而不是继续使用旧授权方向。
+
+Linux 以约 500ms 间隔监控桌面变化、方向配置和授权撤销；推送发送最新待推内容，
+不会为每份内容无限增建线程或积累完整历史。对端可在推送不可用时继续使用
+ETag 轮询回退；这不表示 Linux 在主动轮询其它设备。临时出站失败按
+30/120/600 秒退避（后续保持 600 秒），新内容覆盖旧待推内容；
+400/401/403/413/415 属于永久失败，不自动重试。每设备的反向注册与剪贴板推送有独立队列，
+注册优先，成功后才继续相应的剪贴板推送。
+
+### 顺序持久化与机器时间
+
+`clock.json` 仅保存内容 hash、毫秒 `stamp` 和旧格式的设备计数器（legacy），
+**不保存剪贴板正文**。重启时，若当前 selection 的 hash 与已知记录一致，可以恢复顺序；
+未知的启动前旧 selection 不会直接对外发送，需要复制新的文本触发同步，避免旧内容覆盖新内容。
+
+数字时间戳超过 Linux 当前时间 **5 分钟**的请求返回 400。
+请保持 Linux 和手机时钟正确（建议启用自动校时）；这不是通过任意放宽时间戳校验解决的连接问题。
+
+### 验证范围
+
+此前已在 Android 实机验证的是上传兼容性修复。本节新增的持久化、附近配对、组网、
+暂停及回调机制，验证依据是 Rust 测试和本机真实 TLS/HTTP 集成测试，
+**尚未完成 Windows 与手机的全量互操作实测**。请勿据此假定已有图片同步、Linux 主动扫描或 GUI 支持。
