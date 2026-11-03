@@ -117,7 +117,7 @@ pub fn serve_v2_tls(
                 #[cfg(feature = "wayland")]
                 if let Ok(text) = crate::clipboard::wayland::paste_text() {
                     let hash = hex::encode(sha2::Sha256::digest(text.as_bytes()));
-                    let current = serde_json::json!({"type":"text","text":text,"hash":hash,"size":text.len(),"has_data":false,"data_name":null,"source":"cyime-wayland","stamp":0});
+                    let current = serde_json::json!({"type":"text","text":text,"hash":hash,"size":text.len(),"has_data":false,"data_name":null,"source":"cyime-wayland","v":2,"stamp":{"device_id":"linux","counter":0}});
                     clipboard = Some(current);
                 }
                 if let Some(v) = clipboard.as_ref() {
@@ -157,7 +157,27 @@ pub fn serve_v2_tls(
                         .map(|x| x.len() == 64)
                         .unwrap_or(false)
                     && v.get("size").and_then(|x| x.as_u64()).is_some()
-                    && v.get("stamp").and_then(|x| x.as_i64()).is_some();
+                    && v.get("stamp")
+                        .and_then(|x| x.get("device_id"))
+                        .and_then(|x| x.as_str())
+                        .is_some()
+                    && v.get("stamp")
+                        .and_then(|x| x.get("counter"))
+                        .and_then(|x| x.as_u64())
+                        .is_some()
+                    && v.get("text")
+                        .and_then(|x| x.as_str())
+                        .map(|t| {
+                            hex::encode(sha2::Sha256::digest(t.as_bytes()))
+                                == v.get("hash").and_then(|x| x.as_str()).unwrap_or("")
+                        })
+                        .unwrap_or(false)
+                    && v.get("text")
+                        .and_then(|x| x.as_str())
+                        .map(|t| {
+                            t.len() == v.get("size").and_then(|x| x.as_u64()).unwrap_or(0) as usize
+                        })
+                        .unwrap_or(false);
                 if !valid {
                     req.respond(tiny_http::Response::empty(400))?;
                     continue;
