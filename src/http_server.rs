@@ -141,7 +141,7 @@ pub fn serve_v2_tls(
             } else if req.method() == &tiny_http::Method::Put {
                 let mut b = Vec::new();
                 req.as_reader().read_to_end(&mut b)?;
-                let mut v: serde_json::Value = serde_json::from_slice(&b)
+                let v: serde_json::Value = serde_json::from_slice(&b)
                     .map_err(|_| std::io::Error::other("invalid clipboard JSON"))?;
                 let valid = v.get("type").and_then(|x| x.as_str()) == Some("text")
                     && v.get("text").and_then(|x| x.as_str()).is_some()
