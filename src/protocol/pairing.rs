@@ -27,10 +27,7 @@ pub fn decode_secret(encoded: &str) -> Result<[u8; 32], PairingError> {
         .map_err(|_| PairingError::InvalidEncodedLength)
 }
 pub fn token_digest(token: &[u8]) -> String {
-    Sha256::digest(token)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    hex::encode(Sha256::digest(token))
 }
 
 #[allow(dead_code)]

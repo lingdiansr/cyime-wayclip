@@ -1,5 +1,5 @@
-pub mod devices;
 pub(crate) mod clipboard_wire;
+pub mod devices;
 mod profile;
 pub use profile::{ClipboardProfile, ProfileError, MAX_TEXT_BYTES};
 mod limits;

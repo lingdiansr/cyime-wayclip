@@ -67,7 +67,7 @@ pub fn validate_text(bytes: &[u8]) -> Result<(), ProfileError> {
 
 pub fn hash_text(text: &[u8]) -> String {
     let digest = Sha256::digest(text);
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    hex::encode(digest)
 }
 
 #[cfg(test)]
