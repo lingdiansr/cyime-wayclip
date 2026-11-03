@@ -65,7 +65,11 @@ pub fn serve_v2_tls(
             let mut b = Vec::new();
             req.as_reader().read_to_end(&mut b)?;
             let secret = String::from_utf8_lossy(&b);
-            let r = pairing.pair(&secret, "android", 0);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let r = pairing.pair(&secret, "android", now);
             let (code, body) = match r {
                 Ok(x) => (201, serde_json::to_vec(&x).unwrap()),
                 Err(_) => (401, vec![]),
