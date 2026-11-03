@@ -13,3 +13,5 @@ mod auth;
 pub use auth::TokenStore;
 mod qr;
 pub use qr::{OfferError, PairOffer};
+mod status;
+pub use status::SyncStatus;
