@@ -9,3 +9,4 @@ pub mod tls;
 
 pub mod peers;
 pub mod discovery;
+pub mod mesh;
