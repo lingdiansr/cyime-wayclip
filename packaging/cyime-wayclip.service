@@ -4,7 +4,8 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.cargo/bin/cyime-wayclip run
+# Package installers replace @bindir@; the CLI installer writes an absolute path.
+ExecStart=@bindir@/cyime-wayclip run
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=yes

@@ -1,0 +1,28 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release
+        run: cargo build --release --all-features
+      - name: Package Linux tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          root="cyime-wayclip-${version}-x86_64-unknown-linux-gnu"
+          mkdir -p "$root/usr/bin" "$root/usr/share/cyime-wayclip" "$root/usr/lib/systemd/user"
+          install -m755 target/release/cyime-wayclip "$root/usr/bin/"
+          install -m644 packaging/cyime-wayclip.service "$root/usr/share/cyime-wayclip/"
+          sed "s#@bindir@#/usr/bin#g" packaging/cyime-wayclip.service > "$root/usr/lib/systemd/user/cyime-wayclip.service"
+          tar -C "$root" -czf "$root.tar.gz" .
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: '*.tar.gz'
