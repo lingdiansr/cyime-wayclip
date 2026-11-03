@@ -13,6 +13,7 @@ fn main() {
     if verbosity > 0 {
         std::env::set_var("CYIME_VERBOSITY", verbosity.to_string());
     }
+    cyime_wayclip::logging::set_verbosity(verbosity);
     let command = args
         .iter()
         .skip(1)
