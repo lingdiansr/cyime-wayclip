@@ -1,5 +1,4 @@
-use super::{encode_secret, PairOffer, PairingError};
-use std::time::{SystemTime, UNIX_EPOCH};
+use super::{encode_secret, PairOffer};
 use thiserror::Error;
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PairError {
