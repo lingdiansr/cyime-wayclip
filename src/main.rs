@@ -8,6 +8,7 @@ fn main() {
         Some("status") => status(),
         Some("run") | None => run(),
         Some("serve") => serve(args.get(2).map(String::as_str)),
+        Some("serve-v2") => serve_v2(args.get(2).map(String::as_str)),
         Some("pair") => pair(),
         Some(x) => {
             eprintln!("unknown command: {x}");
@@ -89,4 +90,37 @@ fn pair() {
     let uri = "http://127.0.0.1:8765";
     println!("v1_uri={uri} (enter this origin in the Android Lua plugin)");
     print_qr(uri);
+}
+
+fn serve_v2(bind: Option<&str>) {
+    let addr = bind.unwrap_or("127.0.0.1:9876");
+    match cyime_wayclip::tls::generate_identity("localhost") {
+        Ok(id) => {
+            let secret = cyime_wayclip::protocol::encode_secret(&[9; 32]).unwrap();
+            let offer = cyime_wayclip::protocol::PairOffer {
+                v: 2,
+                server_id: "cyime-wayclip".into(),
+                name: "CyIME Wayclip".into(),
+                certificate_sha256: id.fingerprint.clone(),
+                pairing_id: "pairing".into(),
+                secret: secret.clone(),
+                endpoints: vec![format!("https://{addr}")],
+                expires_at: 4102444800,
+            };
+            let uri = cyime_wayclip::protocol::encode_pair_uri(&offer).unwrap();
+            println!("v2_uri={uri}");
+            let mut p =
+                cyime_wayclip::protocol::PairingService::new("cyime-wayclip", "CyIME Wayclip");
+            p.set_offer(offer);
+            if let Err(e) = cyime_wayclip::http_server::serve_v2_tls(
+                addr,
+                cyime_wayclip::server::Server::new(Config::default()),
+                &id,
+                &mut p,
+            ) {
+                eprintln!("serve-v2 error: {e}")
+            }
+        }
+        Err(e) => eprintln!("TLS identity error: {e}"),
+    }
 }
