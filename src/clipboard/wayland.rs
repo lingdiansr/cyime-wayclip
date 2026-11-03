@@ -1,5 +1,9 @@
 #[cfg(feature = "wayland")]
-use wayland_client::{globals::registry_queue_init, Connection};
+use wayland_client::{
+    globals::{registry_queue_init, GlobalListContents},
+    protocol::wl_registry,
+    Connection, Dispatch, QueueHandle,
+};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaylandCapabilities {
     pub connected: bool,
@@ -13,7 +17,7 @@ pub fn detect() -> WaylandCapabilities {
             globals: vec![],
         };
     };
-    let Ok((globals, _)) = registry_queue_init::<()>(&conn) else {
+    let Ok((globals, _)) = registry_queue_init::<WaylandCapabilities>(&conn) else {
         return WaylandCapabilities {
             connected: false,
             globals: vec![],
@@ -23,8 +27,9 @@ pub fn detect() -> WaylandCapabilities {
         connected: true,
         globals: globals
             .contents()
-            .iter()
-            .map(|g| g.interface.to_string())
+            .clone_list()
+            .into_iter()
+            .map(|g| g.interface)
             .collect(),
     }
 }
@@ -68,5 +73,18 @@ mod tests {
             globals: vec!["zwlr_data_control_manager_v1".into()],
         };
         assert!(c.supports_data_control());
+    }
+}
+
+#[cfg(feature = "wayland")]
+impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandCapabilities {
+    fn event(
+        _: &mut Self,
+        _: &wl_registry::WlRegistry,
+        _: <wl_registry::WlRegistry as wayland_client::Proxy>::Event,
+        _: &GlobalListContents,
+        _: &wayland_client::Connection,
+        _: &QueueHandle<Self>,
+    ) {
     }
 }
