@@ -55,10 +55,9 @@ fn serve(bind: Option<&str>) {
         let mut s = cyime_wayclip::server::Server::<()>::new(Config::default());
         s.mark_ready();
         let code = cyime_wayclip::protocol::generate_pairing_code();
-        println!(
-            "pairing_code={code}\nv1_uri=http://{}",
-            bind.unwrap_or("127.0.0.1:8765")
-        );
+        let uri = format!("http://{}", bind.unwrap_or("127.0.0.1:8765"));
+        println!("pairing_code={code}\nv1_uri={uri}");
+        print_qr(&uri);
         if let Err(e) =
             cyime_wayclip::http_server::serve_v1(bind.unwrap_or("127.0.0.1:8765"), s, &code)
         {
