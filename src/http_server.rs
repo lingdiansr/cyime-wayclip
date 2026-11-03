@@ -73,6 +73,8 @@ pub fn serve_v2_tls(
     )
     .map_err(std::io::Error::other)?;
     let mut token: Option<String> = None;
+    let device_id = uuid::Uuid::new_v4().to_string();
+    let mut counter: u64 = 0;
     let mut clipboard: Option<serde_json::Value> = None;
     for mut req in server.incoming_requests() {
         let path = req.url().to_string();
@@ -131,7 +133,7 @@ pub fn serve_v2_tls(
                 #[cfg(feature = "wayland")]
                 if let Ok(text) = crate::clipboard::wayland::paste_text() {
                     let hash = hex::encode(sha2::Sha256::digest(text.as_bytes()));
-                    let current = serde_json::json!({"type":"text","text":text,"hash":hash,"size":text.len(),"has_data":false,"data_name":null,"source":"cyime-wayland","v":2,"stamp":{"device_id":"linux","counter":0}});
+                    let current = serde_json::json!({"type":"text","text":text,"hash":hash,"size":text.len(),"has_data":false,"data_name":null,"source":"cyime-wayland","v":2,"stamp":{"device_id":device_id,"counter":counter}});
                     clipboard = Some(current);
                 }
                 if let Some(v) = clipboard.as_ref() {
@@ -140,8 +142,14 @@ pub fn serve_v2_tls(
                         .headers()
                         .iter()
                         .find(|h| h.field.equiv("If-None-Match"))
-                        .map(|h| h.value.as_str().trim_matches('"'));
-                    if inm == Some(hash) {
+                        .map(|h| {
+                            h.value
+                                .as_str()
+                                .trim_matches('"')
+                                .split(',')
+                                .any(|x| x.trim().trim_matches('"') == hash)
+                        });
+                    if inm == Some(true) {
                         let mut resp = tiny_http::Response::empty(304);
                         resp.add_header(
                             tiny_http::Header::from_bytes(&b"ETag"[..], hash.as_bytes()).unwrap(),
@@ -196,6 +204,7 @@ pub fn serve_v2_tls(
                     req.respond(tiny_http::Response::empty(400))?;
                     continue;
                 }
+                counter = counter.saturating_add(1);
                 #[cfg(feature = "wayland")]
                 if let Some(text) = v.get("text").and_then(|x| x.as_str()) {
                     let _ = crate::clipboard::wayland::copy_text(text);
