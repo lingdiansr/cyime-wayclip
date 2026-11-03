@@ -250,3 +250,5 @@ Build with `cargo run --features wayland -- serve-v2 192.168.1.10:9876`. The com
 ### Multi-interface v2 listening
 
 `serve-v2` defaults to `0.0.0.0:9876`, so one TCP listener accepts connections on every IPv4 interface (including the Android hotspot interface); QR endpoints are discovered separately and may list up to eight reachable addresses. Passing an explicit host binds only that interface. IPv6 addresses are discovered when available, but the current endpoint formatter is intended primarily for IPv4 hotspot LANs; use an explicit IPv4 host for Android hotspot compatibility.
+
+CLI verbosity: pass `-v`, `-vv`, or `-vvv` to set `CYIME_VERBOSITY` (1–3) for service diagnostics. Existing `RUST_LOG` remains supported by dependencies.
