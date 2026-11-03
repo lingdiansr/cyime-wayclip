@@ -1,5 +1,4 @@
-use rcgen::{generate_simple_self_signed, KeyPair, CertificateParams, CertifiedKey};
-use std::{fs, path::Path};
+use rcgen::generate_simple_self_signed;
 use sha2::{Digest, Sha256};
 use std::{
     fs, io,
@@ -30,6 +29,22 @@ pub fn generate_identity(name: &str) -> Result<Identity, String> {
         fingerprint,
     })
 }
+pub fn stable_server_id() -> Result<String, String> {
+    let Some(dir) = identity_path() else {
+        return Ok(uuid::Uuid::new_v4().to_string());
+    };
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("server-id");
+    if let Ok(v) = fs::read_to_string(&path) {
+        if let Ok(id) = uuid::Uuid::parse_str(v.trim()) {
+            return Ok(id.to_string());
+        }
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    write_private(&path, id.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
 pub fn identity_path() -> Option<PathBuf> {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -86,9 +101,22 @@ pub fn load_or_generate_identity(name: &str, dir: &Path) -> Result<Identity, Str
     if cert_path.exists() && key_path.exists() {
         let cert_pem = fs::read(&cert_path).map_err(|e| e.to_string())?;
         let key_pem = fs::read(&key_path).map_err(|e| e.to_string())?;
-        let cert_der = rustls_pemfile::certs(&mut &cert_pem[..]).next().ok_or("invalid certificate")?.map_err(|e| e.to_string())?.to_vec();
-        let fingerprint = Sha256::digest(&cert_der).iter().map(|b| format!("{b:02x}")).collect();
-        return Ok(Identity { cert_der, key_der: Vec::new(), cert_pem, key_pem, fingerprint });
+        let cert_der = rustls_pemfile::certs(&mut &cert_pem[..])
+            .next()
+            .ok_or("invalid certificate")?
+            .map_err(|e| e.to_string())?
+            .to_vec();
+        let fingerprint = Sha256::digest(&cert_der)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        return Ok(Identity {
+            cert_der,
+            key_der: Vec::new(),
+            cert_pem,
+            key_pem,
+            fingerprint,
+        });
     }
     let identity = generate_identity(name)?;
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
