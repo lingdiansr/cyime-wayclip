@@ -60,6 +60,7 @@ pub fn serve_v2_tls(
         },
     )
     .map_err(std::io::Error::other)?;
+    let mut token: Option<String> = None;
     for mut req in server.incoming_requests() {
         let path = req.url().to_string();
         if path == "/api/pair" {
@@ -85,7 +86,13 @@ pub fn serve_v2_tls(
                         "pair accepted status=201 server_id={} device_id={}",
                         x.server_id, x.device_id
                     );
-                    (201, serde_json::to_vec(&x).unwrap())
+                    (
+                        {
+                            token = Some(x.access_token.clone());
+                            200
+                        },
+                        serde_json::to_vec(&x).unwrap(),
+                    )
                 }
                 Err(e) => {
                     eprintln!("pair rejected: {e}");
@@ -94,6 +101,17 @@ pub fn serve_v2_tls(
             };
             req.respond(tiny_http::Response::from_data(body).with_status_code(code))?;
         } else if path == "/api/status" {
+            let auth = req
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Authorization"))
+                .and_then(|h| h.value.as_str().strip_prefix("Bearer "))
+                .map(|v| token.as_deref() == Some(v.trim()))
+                .unwrap_or(false);
+            if !auth {
+                req.respond(tiny_http::Response::empty(401))?;
+                continue;
+            }
             req.respond(tiny_http::Response::from_string(r#"{"v":2,"connected":true,"send_enabled":true,"receive_enabled":true,"push":true}"#).with_status_code(200))?;
         } else {
             req.respond(tiny_http::Response::empty(404))?;
