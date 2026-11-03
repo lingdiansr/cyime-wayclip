@@ -7,7 +7,7 @@ fn main() {
         Some("doctor") => doctor(),
         Some("status") => status(),
         Some("run") | None => run(),
-        Some("serve") => serve(args.get(2).map(String::as_str)),
+        Some("serve") => serve_v2(args.get(2).map(String::as_str)),
         Some("serve-v2") => serve_v2(args.get(2).map(String::as_str)),
         Some("pair") => pair(),
         Some("config") if args.get(2).map(String::as_str) == Some("init") => config_init(),
