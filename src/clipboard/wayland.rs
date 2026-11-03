@@ -144,3 +144,20 @@ mod provider_tests {
         assert!(DataControlProvider::new(c).unwrap().is_bound());
     }
 }
+/// Data-control integration boundary. A real event loop must dispatch Wayland
+/// events and service offer FDs without blocking the queue; this type documents
+/// the required operations while preserving the provider's single-owner rule.
+#[cfg(feature = "wayland")]
+impl DataControlProvider {
+    pub fn read_selection(
+        &mut self,
+    ) -> Result<Option<crate::protocol::ClipboardProfile>, crate::protocol::ProfileError> {
+        Err(crate::protocol::ProfileError::InvalidUtf8)
+    }
+    pub fn write_selection(
+        &mut self,
+        _: &crate::protocol::ClipboardProfile,
+    ) -> Result<(), crate::protocol::ProfileError> {
+        Err(crate::protocol::ProfileError::InvalidUtf8)
+    }
+}
