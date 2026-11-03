@@ -64,7 +64,7 @@ pub fn serve_v2_tls(
         if path == "/api/pair" {
             let mut b = Vec::new();
             req.as_reader().read_to_end(&mut b)?;
-            let secret = String::from_utf8_lossy(&b);
+            let secret = extract_pair_secret(&b);
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -80,4 +80,19 @@ pub fn serve_v2_tls(
         }
     }
     Ok(())
+}
+
+fn extract_pair_secret(b: &[u8]) -> String {
+    let raw = String::from_utf8_lossy(b).trim().to_string();
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(b) {
+        if let Some(s) = v.get("secret").and_then(|x| x.as_str()) {
+            return s.to_string();
+        }
+    }
+    for part in raw.split('&') {
+        if let Some(v) = part.strip_prefix("secret=") {
+            return v.to_string();
+        }
+    }
+    raw
 }
