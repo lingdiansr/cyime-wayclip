@@ -13,7 +13,12 @@ fn main() {
     if verbosity > 0 {
         std::env::set_var("CYIME_VERBOSITY", verbosity.to_string());
     }
-    match args.get(1).map(String::as_str) {
+    let command = args
+        .iter()
+        .skip(1)
+        .find(|a| !a.starts_with('-'))
+        .map(String::as_str);
+    match command {
         Some("doctor") => doctor(),
         Some("status") => status(),
         Some("run") | None => run(),
