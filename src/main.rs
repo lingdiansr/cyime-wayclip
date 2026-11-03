@@ -158,7 +158,17 @@ fn discover_lan_hosts() -> Vec<String> {
                 std::net::IpAddr::V6(v) => v.is_unicast_link_local(),
             };
             if ok && !out.contains(&ip.to_string()) {
-                out.push(ip.to_string());
+                // Prefer common Android/host hotspot subnets (10.42.0.0/24,
+                // 192.168.43.0/24, 192.168.137.0/24) before other LAN IPs.
+                let text = ip.to_string();
+                if text.starts_with("10.42.0.")
+                    || text.starts_with("192.168.43.")
+                    || text.starts_with("192.168.137.")
+                {
+                    out.insert(0, text);
+                } else {
+                    out.push(text);
+                }
             }
             if out.len() >= 8 {
                 break;
