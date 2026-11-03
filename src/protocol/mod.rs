@@ -21,3 +21,6 @@ mod pairing_service;
 pub use pairing_service::{PairError, PairResponse, PairingService};
 mod basic;
 pub use basic::valid_basic;
+
+mod v2;
+pub use v2::V2Clipboard;
