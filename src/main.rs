@@ -105,13 +105,17 @@ fn serve_v2(bind: Option<&str>) {
     }
     match cyime_wayclip::tls::generate_identity("localhost") {
         Ok(id) => {
-            let secret = cyime_wayclip::protocol::encode_secret(&[9; 32]).unwrap();
+            let server_id = uuid::Uuid::new_v4().to_string();
+            let secret_bytes: Vec<u8> = (0..2)
+                .flat_map(|_| *uuid::Uuid::new_v4().as_bytes())
+                .collect();
+            let secret = cyime_wayclip::protocol::encode_secret(&secret_bytes).unwrap();
             let offer = cyime_wayclip::protocol::PairOffer {
                 v: 2,
-                server_id: "cyime-wayclip".into(),
+                server_id: server_id.clone(),
                 name: "CyIME Wayclip".into(),
                 certificate_sha256: id.fingerprint.clone(),
-                pairing_id: "pairing".into(),
+                pairing_id: uuid::Uuid::new_v4().to_string(),
                 secret: secret.clone(),
                 endpoints: hosts
                     .iter()
@@ -124,13 +128,16 @@ fn serve_v2(bind: Option<&str>) {
                         )
                     })
                     .collect(),
-                expires_at: 4102444800,
+                expires_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    + 300,
             };
             let uri = cyime_wayclip::protocol::encode_pair_uri(&offer).unwrap();
             println!("v2_uri={uri}");
             print_qr(&uri);
-            let mut p =
-                cyime_wayclip::protocol::PairingService::new("cyime-wayclip", "CyIME Wayclip");
+            let mut p = cyime_wayclip::protocol::PairingService::new(server_id, "CyIME Wayclip");
             p.set_offer(offer);
             if let Err(e) = cyime_wayclip::http_server::serve_v2_tls(
                 addr,

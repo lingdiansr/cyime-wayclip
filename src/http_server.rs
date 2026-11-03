@@ -78,9 +78,15 @@ pub fn serve_v2_tls(
                 expected_hash,
                 hex::encode(sha2::Sha256::digest(secret.as_bytes()))
             );
-            let r = pairing.pair(&secret, "android", now);
+            let r = pairing.pair(&secret, uuid::Uuid::new_v4().to_string(), now);
             let (code, body) = match r {
-                Ok(x) => (200, serde_json::to_vec(&x).unwrap()),
+                Ok(x) => {
+                    eprintln!(
+                        "pair accepted status=201 server_id={} device_id={}",
+                        x.server_id, x.device_id
+                    );
+                    (201, serde_json::to_vec(&x).unwrap())
+                }
                 Err(e) => {
                     eprintln!("pair rejected: {e}");
                     (401, vec![])

@@ -110,9 +110,17 @@ pub fn encode_compact_offer(offer: &PairOffer) -> Result<String, OfferError> {
     let mut b = vec![2, 1];
     b.extend(ip.octets());
     b.extend(port.to_be_bytes());
-    b.extend([0u8; 16]);
+    b.extend(
+        uuid::Uuid::parse_str(&offer.server_id)
+            .map_err(|_| OfferError::Json)?
+            .as_bytes(),
+    );
     b.extend(cert);
-    b.extend([0u8; 16]);
+    b.extend(
+        uuid::Uuid::parse_str(&offer.pairing_id)
+            .map_err(|_| OfferError::Json)?
+            .as_bytes(),
+    );
     b.extend(secret);
     b.extend(offer.expires_at.to_be_bytes());
     Ok(format!(
@@ -152,5 +160,47 @@ mod uri_tests {
         assert!(encode_pair_uri(&o)
             .unwrap()
             .starts_with("cyime://pair?v=2&"));
+    }
+}
+
+#[cfg(test)]
+mod android_contract_tests {
+    use super::*;
+
+    #[test]
+    fn compact_identity_matches_android_pair_response_validation() {
+        let server_id = uuid::Uuid::new_v4();
+        let pairing_id = uuid::Uuid::new_v4();
+        let device_id = uuid::Uuid::new_v4();
+        let offer = PairOffer {
+            v: 2,
+            server_id: server_id.to_string(),
+            name: "test".into(),
+            certificate_sha256: "ab".repeat(32),
+            pairing_id: pairing_id.to_string(),
+            secret: super::super::encode_secret(&[9; 32]).unwrap(),
+            endpoints: vec!["https://10.42.0.1:9876".into()],
+            expires_at: 300,
+        };
+        let uri = encode_pair_uri(&offer).unwrap();
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(uri.strip_prefix("cyime://pair?v=2&c=").unwrap())
+            .unwrap();
+        assert_eq!(bytes.len(), 112);
+        assert_eq!(&bytes[8..24], server_id.as_bytes());
+        assert_eq!(&bytes[56..72], pairing_id.as_bytes());
+        assert_eq!(&bytes[72..104], &[9; 32]);
+        let mut service = super::super::PairingService::new(server_id.to_string(), "test");
+        service.set_offer(offer.clone());
+        let response = service
+            .pair(&offer.secret, device_id.to_string(), 1)
+            .unwrap();
+        // WindowsPairingProtocol.received requires matching server ID and UUID device ID.
+        assert_eq!(
+            response.server_id,
+            uuid::Uuid::from_slice(&bytes[8..24]).unwrap().to_string()
+        );
+        assert!(uuid::Uuid::parse_str(&response.device_id).is_ok());
+        assert_eq!(response.access_token.len(), 43);
     }
 }
