@@ -27,6 +27,9 @@ impl TokenStore {
     pub fn len(&self) -> usize {
         self.digests.len()
     }
+    pub fn is_empty(&self) -> bool {
+        self.digests.is_empty()
+    }
 }
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
