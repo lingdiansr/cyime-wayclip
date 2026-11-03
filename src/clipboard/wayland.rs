@@ -103,7 +103,7 @@ pub fn has_ext_data_control(caps: &WaylandCapabilities) -> bool {
         .iter()
         .any(|g| g == "ext_data_control_manager_v1")
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "wayland"))]
 mod ext_tests {
     use super::*;
     #[test]
@@ -132,7 +132,7 @@ impl DataControlProvider {
         has_ext_data_control(&self.capabilities)
     }
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "wayland"))]
 mod provider_tests {
     use super::*;
     #[test]
