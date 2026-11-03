@@ -10,12 +10,48 @@ fn main() {
         Some("serve") => serve(args.get(2).map(String::as_str)),
         Some("serve-v2") => serve_v2(args.get(2).map(String::as_str)),
         Some("pair") => pair(),
+        Some("config") if args.get(2).map(String::as_str) == Some("init") => config_init(),
+        Some("help") | Some("--help") | Some("-h") => help(),
         Some(x) => {
             eprintln!("unknown command: {x}");
             std::process::exit(2)
         }
     }
 }
+fn help() {
+    println!("cyime-wayclip - Wayland clipboard synchronization");
+    println!("\nUSAGE:\n  cyime-wayclip <COMMAND> [ADDRESS]");
+    println!("\nCOMMANDS:\n  run                  Inspect Wayland and run the user-session worker");
+    println!("  doctor               Show config path and Wayland capability");
+    println!("  status               Alias for doctor");
+    println!("  config init          Create the default config file");
+    println!("  pair                 Print a v1 pairing code and origin");
+    println!("  serve [ADDRESS]      Start the opt-in v1 HTTP server");
+    println!("  serve-v2 [ADDRESS]   Start the HTTPS QR pairing server");
+}
+
+fn config_init() {
+    let Some(path) = Config::path() else {
+        eprintln!("cannot determine XDG config path");
+        std::process::exit(1);
+    };
+    if path.exists() {
+        println!("config already exists: {}", path.display());
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("create config directory: {e}");
+            std::process::exit(1);
+        }
+    }
+    if let Err(e) = std::fs::write(&path, Config::default().to_toml()) {
+        eprintln!("write config: {e}");
+        std::process::exit(1);
+    }
+    println!("created config: {}", path.display());
+}
+
 fn doctor() {
     println!("config={:?}", Config::path());
     #[cfg(feature = "wayland")]
