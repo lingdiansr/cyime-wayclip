@@ -143,10 +143,9 @@ fn run() {
         let c = cyime_wayclip::clipboard::wayland::detect();
         println!("{}", c.diagnostic());
         if c.provider_status() == cyime_wayclip::clipboard::ProviderStatus::Ready {
-            match cyime_wayclip::clipboard::wayland::paste_text() {
-                Ok(s) => println!("clipboard_bytes={}", s.len()),
-                Err(e) => println!("read_error={e}"),
-            }
+            let addr =
+                std::env::var("CYIME_WAYCLIP_BIND").unwrap_or_else(|_| "0.0.0.0:9876".into());
+            serve_v2(Some(&addr));
         }
     }
     #[cfg(not(feature = "wayland"))]
