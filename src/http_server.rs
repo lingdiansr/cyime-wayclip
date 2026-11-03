@@ -164,6 +164,26 @@ pub fn serve_v2_tls(
             } else {
                 req.respond(tiny_http::Response::empty(405))?;
             }
+        } else if path == "/api/peer" || path == "/api/grant" || path == "/api/introduce" {
+            let auth = req
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Authorization"))
+                .and_then(|h| h.value.as_str().strip_prefix("Bearer "))
+                .map(|v| token.as_deref() == Some(v.trim()))
+                .unwrap_or(false);
+            if !auth {
+                req.respond(tiny_http::Response::empty(401))?;
+                continue;
+            }
+            let mut b = Vec::new();
+            req.as_reader().read_to_end(&mut b)?;
+            let body = if path == "/api/grant" {
+                serde_json::json!({"v":2,"token":token.clone().unwrap_or_default()}).to_string()
+            } else {
+                serde_json::json!({"v":2,"push":false}).to_string()
+            };
+            req.respond(tiny_http::Response::from_string(body).with_status_code(200))?;
         } else if path == "/api/status" {
             let auth = req
                 .headers()
