@@ -33,6 +33,14 @@ pub fn token_digest(token: &[u8]) -> String {
         .collect()
 }
 
+#[allow(dead_code)]
+pub fn generate_pairing_code() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    token_digest(nanos.to_string().as_bytes())[..32].to_string()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,13 +60,4 @@ mod tests {
     fn digest_is_hex() {
         assert_eq!(token_digest(b"x").len(), 64);
     }
-}
-
-#[allow(dead_code)]
-pub fn generate_pairing_code() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    token_digest(nanos.to_string().as_bytes())[..32].to_string()
 }

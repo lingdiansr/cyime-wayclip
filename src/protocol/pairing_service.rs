@@ -38,7 +38,7 @@ impl PairingService {
     pub fn expected_secret_hash(&self) -> String {
         self.offer
             .as_ref()
-            .map(|o| format!("{}", hex::encode(sha2::Sha256::digest(o.secret.as_bytes()))))
+            .map(|o| hex::encode(sha2::Sha256::digest(o.secret.as_bytes())))
             .unwrap_or_default()
     }
     pub fn set_offer(&mut self, offer: PairOffer) {
