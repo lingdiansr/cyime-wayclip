@@ -11,3 +11,5 @@ mod pairing;
 pub use pairing::{decode_secret, encode_secret, token_digest, PairingError};
 mod auth;
 pub use auth::TokenStore;
+mod qr;
+pub use qr::{OfferError, PairOffer};
