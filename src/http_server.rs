@@ -207,7 +207,9 @@ pub fn serve_v2_tls(
                 counter = counter.saturating_add(1);
                 #[cfg(feature = "wayland")]
                 if let Some(text) = v.get("text").and_then(|x| x.as_str()) {
-                    let _ = crate::clipboard::wayland::copy_text(text);
+                    if let Err(e) = crate::clipboard::wayland::copy_text(text) {
+                        vlog(1, format!("Wayland clipboard write failed: {e}"));
+                    }
                 }
                 clipboard = Some(v.clone());
                 let mut resp =
