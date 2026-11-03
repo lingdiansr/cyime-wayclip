@@ -19,8 +19,13 @@ name = "cyime-wayclip"
 path = "src/main.rs"
 
 [features]
-wayland = ["dep:wayland-client"]
+wayland = ["dep:wayland-client", "dep:wayland-protocols"]
 
 [dependencies.wayland-client]
 version = "0.31"
+optional = true
+
+[dependencies.wayland-protocols]
+version = "0.32"
+features = ["staging"]
 optional = true
