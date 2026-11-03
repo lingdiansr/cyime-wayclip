@@ -93,6 +93,8 @@ pub fn serve_v2_tls(
                 }
             };
             req.respond(tiny_http::Response::from_data(body).with_status_code(code))?;
+        } else if path == "/api/status" {
+            req.respond(tiny_http::Response::from_string(r#"{"v":2,"connected":true,"send_enabled":true,"receive_enabled":true,"push":true}"#).with_status_code(200))?;
         } else {
             req.respond(tiny_http::Response::empty(404))?;
         }
