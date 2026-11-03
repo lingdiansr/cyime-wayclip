@@ -140,6 +140,18 @@ pub fn serve_v2_tls(
                 req.as_reader().read_to_end(&mut b)?;
                 let v: serde_json::Value = serde_json::from_slice(&b)
                     .map_err(|_| std::io::Error::other("invalid clipboard JSON"))?;
+                let valid = v.get("type").and_then(|x| x.as_str()) == Some("text")
+                    && v.get("text").and_then(|x| x.as_str()).is_some()
+                    && v.get("hash")
+                        .and_then(|x| x.as_str())
+                        .map(|x| x.len() == 64)
+                        .unwrap_or(false)
+                    && v.get("size").and_then(|x| x.as_u64()).is_some()
+                    && v.get("stamp").and_then(|x| x.as_i64()).is_some();
+                if !valid {
+                    req.respond(tiny_http::Response::empty(400))?;
+                    continue;
+                }
                 clipboard = Some(v.clone());
                 let mut resp =
                     tiny_http::Response::from_string(v.to_string()).with_status_code(200);
