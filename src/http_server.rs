@@ -71,10 +71,20 @@ pub fn serve_v2_tls(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
+            let expected_hash = pairing.expected_secret_hash();
+            eprintln!(
+                "pair timing now={} expected_secret_hash={} extracted_hash={}",
+                now,
+                expected_hash,
+                hex::encode(sha2::Sha256::digest(secret.as_bytes()))
+            );
             let r = pairing.pair(&secret, "android", now);
             let (code, body) = match r {
                 Ok(x) => (201, serde_json::to_vec(&x).unwrap()),
-                Err(_) => (401, vec![]),
+                Err(e) => {
+                    eprintln!("pair rejected: {e}");
+                    (401, vec![])
+                }
             };
             req.respond(tiny_http::Response::from_data(body).with_status_code(code))?;
         } else {
