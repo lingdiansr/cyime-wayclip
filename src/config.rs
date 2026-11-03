@@ -8,6 +8,7 @@ pub struct Config {
     pub send_enabled: bool,
     pub receive_enabled: bool,
     pub max_text_bytes: usize,
+    pub server_id: String,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -16,12 +17,13 @@ impl Default for Config {
             send_enabled: true,
             receive_enabled: true,
             max_text_bytes: crate::protocol::MAX_TEXT_BYTES,
+            server_id: uuid::Uuid::new_v4().to_string(),
         }
     }
 }
 impl Config {
     pub fn to_toml(&self) -> String {
-        format!("allow_insecure_v1 = {}\nsend_enabled = {}\nreceive_enabled = {}\nmax_text_bytes = {}\n", self.allow_insecure_v1, self.send_enabled, self.receive_enabled, self.max_text_bytes)
+        format!("allow_insecure_v1 = {}\nsend_enabled = {}\nreceive_enabled = {}\nmax_text_bytes = {}\nserver_id = \"{}\"\n", self.allow_insecure_v1, self.send_enabled, self.receive_enabled, self.max_text_bytes, self.server_id)
     }
     pub fn from_toml(input: &str) -> Self {
         let mut c = Self::default();
@@ -35,6 +37,12 @@ impl Config {
                 "send_enabled" => c.send_enabled = v.trim() != "false",
                 "receive_enabled" => c.receive_enabled = v.trim() != "false",
                 "max_text_bytes" => c.max_text_bytes = v.trim().parse().unwrap_or(c.max_text_bytes),
+                "server_id" => {
+                    let id = v.trim().trim_matches('"');
+                    if uuid::Uuid::parse_str(id).is_ok() {
+                        c.server_id = id.to_string();
+                    }
+                }
                 _ => {}
             }
         }
@@ -92,6 +100,7 @@ mod tests {
             send_enabled: false,
             receive_enabled: true,
             max_text_bytes: 42,
+            server_id: uuid::Uuid::new_v4().to_string(),
         };
         save_to_cleanup(&path, &c);
         assert_eq!(

@@ -212,9 +212,20 @@ fn serve_v2(bind: Option<&str>) {
         eprintln!("serve-v2 requires a reachable LAN host");
         return;
     }
-    match cyime_wayclip::tls::generate_identity("localhost") {
+    let config = Config::load().unwrap_or_else(|e| {
+        eprintln!("load config: {e}");
+        Config::default()
+    });
+    let state_dir = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state"))
+        })
+        .map(|p| p.join("cyime-wayclip"))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    match cyime_wayclip::tls::load_or_generate_identity("localhost", &state_dir) {
         Ok(id) => {
-            let server_id = uuid::Uuid::new_v4().to_string();
+            let server_id = config.server_id.clone();
             let secret_bytes: Vec<u8> = (0..2)
                 .flat_map(|_| *uuid::Uuid::new_v4().as_bytes())
                 .collect();
