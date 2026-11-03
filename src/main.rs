@@ -109,6 +109,7 @@ fn serve_v2(bind: Option<&str>) {
             };
             let uri = cyime_wayclip::protocol::encode_pair_uri(&offer).unwrap();
             println!("v2_uri={uri}");
+            print_qr(&uri);
             let mut p =
                 cyime_wayclip::protocol::PairingService::new("cyime-wayclip", "CyIME Wayclip");
             p.set_offer(offer);
