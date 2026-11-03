@@ -1,3 +1,4 @@
+pub(crate) mod clipboard_wire;
 mod profile;
 pub use profile::{ClipboardProfile, ProfileError, MAX_TEXT_BYTES};
 mod limits;

@@ -130,8 +130,17 @@ ss -ltn | grep 9876
 
 - **二维码过期或配对失败**：配对 offer 已消费或过期，重新启动 `serve-v2`；
 - **连接超时**：检查手机和 Linux 是否在同一 Wi-Fi、二维码地址是否正确，以及防火墙是否允许 TCP 9876；
-- **已连接但不同步**：确认 Linux 在 Wayland 会话中，运行 `doctor` 检查 clipboard data-control 能力；
+- **已连接但不同步**：连接检查成功不代表上传已成功。运行 `cyime-wayclip -v serve-v2`，检查 `clipboard PUT rejected` 或 `Wayland clipboard write failed`；确认服务以 `--all-features` 构建、安装了 `wl-copy`，且运行在正确的 Wayland 用户会话中。上传格式错误返回 400、超限返回 413、桌面剪贴板写入失败返回 503，不会伪报成功；
 - **服务启动后立即退出**：查看 `journalctl --user`，确认 user systemd、Wayland 环境变量和权限可用。
+
+### Android 上传格式兼容
+
+`PUT /api/clipboard` 接受当前 Android 的文本 profile（可省略 `v`，
+`stamp` 为非负 64 位有符号整数），同时保留 `v=2`、
+`stamp={"device_id":"…","counter":1}` 的对象格式兼容。
+显式提供 `v` 时必须为 `2`。服务保留发送方的原始字段，
+不会将手机的时间戳当成逻辑计数器。文本仍需通过 SHA-256、UTF-8 字节数和大小限制校验；
+只有桌面写入成功后才返回 200 和对应的 ETag。
 
 ## 开发与验证
 
