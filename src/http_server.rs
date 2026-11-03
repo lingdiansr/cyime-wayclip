@@ -3,6 +3,7 @@ use crate::{
     protocol::{GetResult, PutResult},
     server::Server,
 };
+use sha2::Digest;
 use std::io::Read;
 pub fn serve_v1(addr: &str, mut state: Server<()>, pairing_code: &str) -> std::io::Result<()> {
     let server = tiny_http::Server::http(addr).map_err(std::io::Error::other)?;
@@ -65,6 +66,7 @@ pub fn serve_v2_tls(
             let mut b = Vec::new();
             req.as_reader().read_to_end(&mut b)?;
             let secret = extract_pair_secret(&b);
+            eprintln!("pair request method={:?} path={} content_type={:?} body_len={} body_hash={} secret_len={} secret_hash={}", req.method(), path, req.headers().iter().find(|h| h.field.equiv("Content-Type")).map(|h| h.value.as_str()), b.len(), hex::encode(sha2::Sha256::digest(&b)), secret.len(), hex::encode(sha2::Sha256::digest(secret.as_bytes())));
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
