@@ -1,7 +1,4 @@
-use cyime_wayclip::{
-    clipboard::{ClipboardProvider, UnavailableProvider},
-    config::Config,
-};
+use cyime_wayclip::{clipboard::UnavailableProvider, config::Config};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
