@@ -8,3 +8,4 @@ pub mod state;
 pub mod tls;
 
 pub mod peers;
+pub mod discovery;
