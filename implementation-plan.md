@@ -254,3 +254,6 @@ Build with `cargo run --features wayland -- serve-v2 192.168.1.10:9876`. The com
 CLI verbosity: pass `-v`, `-vv`, or `-vvv` to set `CYIME_VERBOSITY` (1–3) for service diagnostics. Existing `RUST_LOG` remains supported by dependencies.
 
 Logging: `-v/-vv/-vvv` controls diagnostics emitted to stderr/stdout. Set `CYIME_LOG_FILE=/path/to/cyime-wayclip.log` for an additional append-only file sink; absent this variable no file is created. Prefer a user-owned XDG state path (`$XDG_STATE_HOME/cyime-wayclip/cyime-wayclip.log` or `$HOME/.local/state/cyime-wayclip/cyime-wayclip.log`) and restrict permissions to the user.
+
+
+CI/local validation: run `cargo fmt --all -- --check`, `cargo test --all-features`, and `cargo clippy --all-features --all-targets -- -D warnings` before pushing. PUT logs Wayland MIME/seat errors at `-v`; use `-vvv` for request tracing.
