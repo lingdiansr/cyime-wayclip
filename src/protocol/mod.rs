@@ -19,3 +19,5 @@ mod status;
 pub use status::SyncStatus;
 mod pairing_service;
 pub use pairing_service::{PairError, PairResponse, PairingService};
+mod basic;
+pub use basic::valid_basic;
