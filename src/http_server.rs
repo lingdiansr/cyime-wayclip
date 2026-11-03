@@ -80,7 +80,7 @@ pub fn serve_v2_tls(
             );
             let r = pairing.pair(&secret, "android", now);
             let (code, body) = match r {
-                Ok(x) => (201, serde_json::to_vec(&x).unwrap()),
+                Ok(x) => (200, serde_json::to_vec(&x).unwrap()),
                 Err(e) => {
                     eprintln!("pair rejected: {e}");
                     (401, vec![])
