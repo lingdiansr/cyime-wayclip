@@ -46,12 +46,12 @@ fn run() {
     println!("cyime-wayclip: no Wayland provider available (build with --features wayland)");
 }
 
-fn serve() {
+fn serve(bind: Option<&str>) {
     #[cfg(feature = "wayland")]
     {
         let mut s = cyime_wayclip::server::Server::<()>::new(Config::default());
         s.mark_ready();
-        if let Err(e) = cyime_wayclip::http_server::serve_v1("127.0.0.1:8765", s) {
+        if let Err(e) = cyime_wayclip::http_server::serve_v1(bind.unwrap_or("127.0.0.1:8765"), s) {
             eprintln!("serve error: {e}");
         }
     }
