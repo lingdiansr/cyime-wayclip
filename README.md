@@ -55,6 +55,16 @@ The service runs in the logged-in graphical session. It is not a system service 
 cyime-wayclip service uninstall
 ```
 
+## Android client
+
+The Android peer is **CyIME**, maintained in the companion repository:
+
+- Repository: https://github.com/Cyletix/CyIME
+- Releases/APK: https://github.com/Cyletix/CyIME/releases
+- Android source: `app/src/main/java/com/kingzcheung/xime/clipboard/sync/DeviceHost.kt`
+
+Install a recent CyIME APK (Android 9/API 28 or newer), enable CyIME as the active input method, then open its clipboard-sync settings. The native v2 client implements QR pairing, status polling, ETag clipboard exchange, and Bearer-token authentication expected by this project.
+
 ## Pair Android and sync
 
 Start the v2 pairing server on the LAN interface:
