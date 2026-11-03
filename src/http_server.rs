@@ -114,6 +114,12 @@ pub fn serve_v2_tls(
                 continue;
             }
             if req.method() == &tiny_http::Method::Get {
+                #[cfg(feature = "wayland")]
+                if let Ok(text) = crate::clipboard::wayland::paste_text() {
+                    let hash = hex::encode(sha2::Sha256::digest(text.as_bytes()));
+                    let current = serde_json::json!({"type":"text","text":text,"hash":hash,"size":text.len(),"has_data":false,"data_name":null,"source":"cyime-wayland","stamp":0});
+                    clipboard = Some(current);
+                }
                 if let Some(v) = clipboard.as_ref() {
                     let hash = v.get("hash").and_then(|x| x.as_str()).unwrap_or("");
                     let inm = req
