@@ -7,6 +7,7 @@ fn main() {
         Some("doctor") => doctor(),
         Some("status") => status(),
         Some("run") | None => run(),
+        Some("serve") => serve(),
         Some(x) => {
             eprintln!("unknown command: {x}");
             std::process::exit(2)
@@ -43,4 +44,19 @@ fn run() {
     }
     #[cfg(not(feature = "wayland"))]
     println!("cyime-wayclip: no Wayland provider available (build with --features wayland)");
+}
+
+fn serve() {
+    #[cfg(feature = "wayland")]
+    {
+        let mut s = cyime_wayclip::server::Server::<()>::new(Config::default());
+        s.mark_ready();
+        if let Err(e) = cyime_wayclip::http_server::serve_v1("127.0.0.1:8765", s) {
+            eprintln!("serve error: {e}");
+        }
+    }
+    #[cfg(not(feature = "wayland"))]
+    {
+        eprintln!("serve requires --features wayland");
+    }
 }
