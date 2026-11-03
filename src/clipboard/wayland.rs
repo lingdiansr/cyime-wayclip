@@ -163,12 +163,16 @@ impl DataControlProvider {
 }
 #[cfg(feature = "wayland")]
 pub fn copy_text(text: &str) -> Result<(), String> {
-    use wl_clipboard_rs::copy::{copy, ClipboardType, MimeType, Options, Seat, Source};
+    use wl_clipboard_rs::copy::{
+        copy, ClipboardType, MimeType, Options, Seat, ServeRequests, Source,
+    };
+    let mut options = Options::new();
+    options
+        .clipboard(ClipboardType::Regular)
+        .seat(Seat::All)
+        .serve_requests(ServeRequests::Unlimited);
     copy(
-        Options::new()
-            .clipboard(ClipboardType::Regular)
-            .seat(Seat::Unspecified)
-            .serve_requests(wl_clipboard_rs::copy::ServeRequests::Never),
+        options,
         Source::Bytes(text.as_bytes().to_vec().into()),
         MimeType::Text,
     )
