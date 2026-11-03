@@ -246,3 +246,7 @@ Serve LAN example: `cyime-wayclip serve 192.168.1.10:8765`. Only bind a trusted 
 Build with `cargo run --features wayland -- serve-v2 192.168.1.10:9876`. The command prints a `cyime://pair?v=2&data=...` URI. Android must validate the HTTPS endpoint and pin the printed certificate DER SHA-256 fingerprint; do not disable certificate verification. The current listener implements pairing only; clipboard v2 sync remains incomplete.
 
 `serve-v2` requires an explicit reachable LAN address, e.g. `cargo run --features wayland -- serve-v2 192.168.1.10:9876`; it rejects 0.0.0.0, 127.0.0.1, and localhost because Android would resolve those to itself. Bind the listener to the LAN interface and scan the printed QR on the same network.
+
+### Multi-interface v2 listening
+
+`serve-v2` defaults to `0.0.0.0:9876`, so one TCP listener accepts connections on every IPv4 interface (including the Android hotspot interface); QR endpoints are discovered separately and may list up to eight reachable addresses. Passing an explicit host binds only that interface. IPv6 addresses are discovered when available, but the current endpoint formatter is intended primarily for IPv4 hotspot LANs; use an explicit IPv4 host for Android hotspot compatibility.
