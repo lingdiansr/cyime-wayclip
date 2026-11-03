@@ -234,3 +234,7 @@ A+B+C约7～11人日；A+B+D约9～15人日；加跨桌面和E约3～5周量级�
 - 目标目录当前只读：创建`/home/wks/code/Rust/cyime-wayclip`失败（只读文件系统）；当前文档暂存工作区，未修改挂载或权限。
 
 最终建议：**先锁定Wayland provider与既有wire contract，再用原客户端互通；产品默认v2，v1只是可跳过验证路径。重点复用现有Android协议客户端，而不是再写一个Linux同步插件。**
+
+## 当前实现运行说明
+
+`cyime-wayclip serve` 当前启动 v1 HTTP listener；默认仅绑定 `127.0.0.1:8765`，尚未实现 TLS。Android Lua v1 插件配置时使用 server origin（例如 `http://192.168.1.10:8765`），插件会访问 `/api/clipboard`，认证需按协议使用 Basic `cyime:<pairing-code>`。公网或不可信 LAN 不应启用；v2 HTTPS/pinning 仍待实现。
