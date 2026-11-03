@@ -94,7 +94,11 @@ fn pair() {
 
 fn serve_v2(bind: Option<&str>) {
     let addr = bind.unwrap_or("0.0.0.0:9876");
-    let host = addr.split(':').next().unwrap_or("");
+    let host = if addr.starts_with("0.0.0.0:") {
+        discover_lan_host().unwrap_or_else(|| "127.0.0.1".into())
+    } else {
+        addr.split(':').next().unwrap_or("").into()
+    };
     if host == "0.0.0.0" || host == "127.0.0.1" || host == "localhost" {
         eprintln!("serve-v2 requires a reachable LAN host (e.g. 192.168.1.10:9876), not {addr}");
         return;
@@ -109,7 +113,7 @@ fn serve_v2(bind: Option<&str>) {
                 certificate_sha256: id.fingerprint.clone(),
                 pairing_id: "pairing".into(),
                 secret: secret.clone(),
-                endpoints: vec![format!("https://{addr}")],
+                endpoints: vec![format!("https://{}", addr.replace("0.0.0.0", &host))],
                 expires_at: 4102444800,
             };
             let uri = cyime_wayclip::protocol::encode_pair_uri(&offer).unwrap();
@@ -129,4 +133,11 @@ fn serve_v2(bind: Option<&str>) {
         }
         Err(e) => eprintln!("TLS identity error: {e}"),
     }
+}
+
+fn discover_lan_host() -> Option<String> {
+    use std::net::UdpSocket;
+    let s = UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("192.0.2.1:9").ok()?;
+    Some(s.local_addr().ok()?.ip().to_string())
 }
