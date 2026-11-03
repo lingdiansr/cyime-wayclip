@@ -6,27 +6,12 @@ use crate::{
 use sha2::Digest;
 use std::io::Read;
 fn vlog(level: u8, msg: impl std::fmt::Display) {
-    if std::env::var("CYIME_VERBOSITY")
+    let threshold = std::env::var("CYIME_VERBOSITY")
         .ok()
         .and_then(|x| x.parse().ok())
-        .unwrap_or(0)
-        >= level
-    {
-        {
-            let line = format!("[v{level}] {msg}");
-            eprintln!("{line}");
-            println!("{line}");
-            if let Some(path) = std::env::var_os("CYIME_LOG_FILE") {
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                {
-                    use std::io::Write;
-                    let _ = writeln!(f, "{line}");
-                }
-            }
-        }
+        .unwrap_or(0);
+    if threshold >= level {
+        log::info!(target: "cyime_wayclip", "{msg}");
     }
 }
 pub fn serve_v1(addr: &str, mut state: Server<()>, pairing_code: &str) -> std::io::Result<()> {
