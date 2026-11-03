@@ -9,3 +9,5 @@ mod http;
 pub use http::{get, put, Direction, GetResult, HttpStatus, PutResult};
 mod pairing;
 pub use pairing::{decode_secret, encode_secret, token_digest, PairingError};
+mod auth;
+pub use auth::TokenStore;
