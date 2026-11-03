@@ -1,5 +1,6 @@
-//! Bounded, persistent device credentials. Raw tokens are returned once, never stored.
+//! Bounded, persistent credentials. Only token digests are stored.
 use super::encode_secret;
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
@@ -243,6 +244,93 @@ impl DeviceRegistry {
         let mut next = self.devices.clone();
         if let Some(i) = index {
             next[i] = device;
+            // Rotating an owner's key invalidates all authority delegated by that key.
+            let descendants = self.revocation_set(&device_id);
+            next.retain(|device| {
+                device.summary.device_id == device_id
+                    || !descendants.contains(&device.summary.device_id)
+            });
+        } else {
+            next.push(device);
+        }
+        self.persist(&next)?;
+        self.devices = next;
+        Ok((device_id, token))
+    }
+
+    /// Stable per-owner/per-target capability. Authenticate inside the transaction,
+    /// never trust an owner ID obtained from an earlier, possibly stale snapshot.
+    pub fn grant(
+        &mut self,
+        owner_token: &str,
+        client_id: &str,
+        name: &str,
+    ) -> io::Result<(String, String)> {
+        self.transaction(|registry| registry.grant_unlocked(owner_token, client_id, name))
+    }
+
+    fn grant_unlocked(
+        &mut self,
+        owner_token: &str,
+        client_id: &str,
+        name: &str,
+    ) -> io::Result<(String, String)> {
+        let owner = self.authenticate(owner_token).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::PermissionDenied, "invalid grant owner token")
+        })?;
+        let key = format!("grant:{owner}:{client_id}");
+        if client_id.is_empty() || key.len() > MAX_LABEL_BYTES || name.len() > MAX_LABEL_BYTES {
+            return Err(invalid("invalid grant client ID or name"));
+        }
+        let index = self
+            .devices
+            .iter()
+            .position(|device| device.summary.client_id == key);
+        if index.is_none() && self.devices.len() >= MAX_DEVICES {
+            return Err(io::Error::other("device limit reached"));
+        }
+        let device_id = match index {
+            Some(i) => self.devices[i].summary.device_id.clone(),
+            None => uuid::Builder::from_random_bytes(random_bytes()?[..16].try_into().unwrap())
+                .into_uuid()
+                .to_string(),
+        };
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(owner_token.as_bytes())
+            .map_err(|_| io::Error::other("invalid HMAC key"))?;
+        mac.update(b"cyime-wayclip/grant-token/v1\0");
+        for field in [device_id.as_bytes(), client_id.as_bytes()] {
+            mac.update(&(field.len() as u64).to_be_bytes());
+            mac.update(field);
+        }
+        let token_bytes: [u8; 32] = mac.finalize().into_bytes().into();
+        let token =
+            encode_secret(&token_bytes).map_err(|_| io::Error::other("token encoding failed"))?;
+        let token_digest = digest(&token);
+        let mut next = self.devices.clone();
+        let device = Device {
+            summary: DeviceSummary {
+                device_id: device_id.clone(),
+                client_id: key,
+                name: name.into(),
+            },
+            digest: token_digest,
+        };
+        if let Some(i) = index {
+            if digest_matches(&self.devices[i].digest, &token_digest)
+                && self.devices[i].summary.name == name
+            {
+                return Ok((device_id, token));
+            }
+            // Migration from an old random grant is a credential rotation too.
+            let changed = !digest_matches(&self.devices[i].digest, &token_digest);
+            next[i] = device;
+            if changed {
+                let descendants = self.revocation_set(&device_id);
+                next.retain(|device| {
+                    device.summary.device_id == device_id
+                        || !descendants.contains(&device.summary.device_id)
+                });
+            }
         } else {
             next.push(device);
         }
@@ -267,7 +355,7 @@ impl DeviceRegistry {
         self.transaction(|registry| registry.revoke_unlocked(id))
     }
 
-    fn revoke_unlocked(&mut self, id: &str) -> io::Result<bool> {
+    fn revocation_set(&self, id: &str) -> std::collections::HashSet<String> {
         let mut revoked = std::collections::HashSet::from([id.to_owned()]);
         loop {
             let before = revoked.len();
@@ -285,6 +373,11 @@ impl DeviceRegistry {
                 break;
             }
         }
+        revoked
+    }
+
+    fn revoke_unlocked(&mut self, id: &str) -> io::Result<bool> {
+        let revoked = self.revocation_set(id);
         let mut next = self.devices.clone();
         next.retain(|device| !revoked.contains(&device.summary.device_id));
         if next.len() == self.devices.len() {
@@ -378,6 +471,112 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn stable_grants_survive_restart_without_storing_tokens() {
+        let directory = Directory::new();
+        let path = directory.file();
+        let mut registry = DeviceRegistry::open(Some(path.clone())).unwrap();
+        let (_, owner) = registry.issue("owner", "owner").unwrap();
+        let first = registry.grant(&owner, "target", "target").unwrap();
+        assert_eq!(registry.grant(&owner, "target", "target").unwrap(), first);
+        let mut restarted = DeviceRegistry::open(Some(path.clone())).unwrap();
+        assert_eq!(
+            restarted.grant(&owner, "target", "renamed target").unwrap(),
+            first
+        );
+        assert_eq!(restarted.authenticate(&first.1), Some(first.0));
+        let bytes = fs::read_to_string(path).unwrap();
+        assert!(!bytes.contains(&owner));
+        assert!(!bytes.contains(&first.1));
+    }
+
+    #[test]
+    fn grants_are_isolated_by_owner_and_target_and_old_owner_tokens_fail() {
+        let mut registry = DeviceRegistry::open(None).unwrap();
+        let (_, a) = registry.issue("a", "a").unwrap();
+        let (_, b) = registry.issue("b", "b").unwrap();
+        let aa = registry.grant(&a, "target", "target").unwrap();
+        let ab = registry.grant(&a, "another-target", "target").unwrap();
+        let ba = registry.grant(&b, "target", "target").unwrap();
+        assert_ne!(aa, ab);
+        assert_ne!(aa, ba);
+        registry.issue("a", "a").unwrap();
+        assert_eq!(
+            registry.grant(&a, "target", "target").unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(registry.authenticate(&aa.1).is_none());
+        assert!(registry.authenticate(&ab.1).is_none());
+        assert_eq!(registry.authenticate(&ba.1), Some(ba.0));
+    }
+
+    #[test]
+    fn direct_repair_revokes_descendants_but_not_other_owners() {
+        let mut registry = DeviceRegistry::open(None).unwrap();
+        let (root, owner) = registry.issue("root", "root").unwrap();
+        let (_, child) = registry.grant(&owner, "child", "child").unwrap();
+        let (_, nested) = registry.grant(&child, "nested", "nested").unwrap();
+        let (_, other) = registry.issue("other", "other").unwrap();
+        let (_, other_grant) = registry.grant(&other, "child", "child").unwrap();
+        let (same_id, new_owner) = registry.issue("root", "root").unwrap();
+        assert_eq!(same_id, root);
+        for token in [owner, child, nested] {
+            assert!(registry.authenticate(&token).is_none());
+        }
+        assert!(registry.authenticate(&new_owner).is_some());
+        assert!(registry.authenticate(&other_grant).is_some());
+    }
+
+    #[test]
+    fn legacy_random_grant_migrates_once_and_invalidates_its_descendants() {
+        let mut registry = DeviceRegistry::open(None).unwrap();
+        let (owner_id, owner) = registry.issue("owner", "owner").unwrap();
+        let (id, old) = registry
+            .issue(&format!("grant:{owner_id}:target"), "target")
+            .unwrap();
+        let (_, nested) = registry.grant(&old, "nested", "nested").unwrap();
+        let derived = registry.grant(&owner, "target", "target").unwrap();
+        assert_eq!(derived.0, id);
+        assert_ne!(derived.1, old);
+        assert!(registry.authenticate(&old).is_none());
+        assert!(registry.authenticate(&nested).is_none());
+        assert_eq!(registry.grant(&owner, "target", "target").unwrap(), derived);
+    }
+
+    #[test]
+    fn concurrent_grants_are_stable_and_stale_owner_handles_cannot_authorize() {
+        let directory = Directory::new();
+        let path = directory.file();
+        let mut registry = DeviceRegistry::open(Some(path.clone())).unwrap();
+        let (owner_id, owner) = registry.issue("owner", "owner").unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let owner = owner.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let mut registry = DeviceRegistry::open(Some(path)).unwrap();
+                    barrier.wait();
+                    registry.grant(&owner, "same-target", "target").unwrap()
+                })
+            })
+            .collect();
+        let results: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(results[0], results[1]);
+        let mut stale = DeviceRegistry::open(Some(path.clone())).unwrap();
+        registry.revoke(&owner_id).unwrap();
+        assert_eq!(
+            stale.grant(&owner, "orphan", "orphan").unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let current = DeviceRegistry::open(Some(path)).unwrap();
+        assert!(current.list().is_empty());
     }
 
     #[test]
