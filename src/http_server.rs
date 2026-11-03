@@ -44,3 +44,36 @@ pub fn serve_v1(addr: &str, mut state: Server<()>, pairing_code: &str) -> std::i
     }
     Ok(())
 }
+
+pub fn serve_v2_tls(
+    addr: &str,
+    state: Server<()>,
+    identity: &crate::tls::Identity,
+    pairing: &mut crate::protocol::PairingService,
+) -> std::io::Result<()> {
+    let server = tiny_http::Server::https(
+        addr,
+        tiny_http::SslConfig {
+            certificate: identity.cert_der.clone(),
+            private_key: identity.key_der.clone(),
+        },
+    )
+    .map_err(std::io::Error::other)?;
+    for mut req in server.incoming_requests() {
+        let path = req.url().to_string();
+        if path == "/api/pair" {
+            let mut b = Vec::new();
+            req.as_reader().read_to_end(&mut b)?;
+            let secret = String::from_utf8_lossy(&b);
+            let r = pairing.pair(&secret, "android", 0);
+            let (code, body) = match r {
+                Ok(x) => (201, serde_json::to_vec(&x).unwrap()),
+                Err(_) => (401, vec![]),
+            };
+            req.respond(tiny_http::Response::from_data(body).with_status_code(code))?;
+        } else {
+            req.respond(tiny_http::Response::empty(404))?;
+        }
+    }
+    Ok(())
+}
