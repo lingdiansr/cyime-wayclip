@@ -7,7 +7,7 @@ fn main() {
         Some("doctor") => doctor(),
         Some("status") => status(),
         Some("run") | None => run(),
-        Some("serve") => serve(),
+        Some("serve") => serve(args.get(2).map(String::as_str)),
         Some(x) => {
             eprintln!("unknown command: {x}");
             std::process::exit(2)

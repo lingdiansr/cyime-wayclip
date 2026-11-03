@@ -53,3 +53,11 @@ mod tests {
         assert_eq!(token_digest(b"x").len(), 64);
     }
 }
+
+pub fn generate_pairing_code() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    token_digest(nanos.to_string().as_bytes())[..32].to_string()
+}
