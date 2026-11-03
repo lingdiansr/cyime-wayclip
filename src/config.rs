@@ -17,6 +17,26 @@ impl Default for Config {
     }
 }
 impl Config {
+    pub fn to_toml(&self) -> String {
+        format!("allow_insecure_v1 = {}\nsend_enabled = {}\nreceive_enabled = {}\nmax_text_bytes = {}\n", self.allow_insecure_v1, self.send_enabled, self.receive_enabled, self.max_text_bytes)
+    }
+    pub fn from_toml(input: &str) -> Self {
+        let mut c = Self::default();
+        for line in input.lines() {
+            let mut it = line.splitn(2, '=');
+            let (Some(k), Some(v)) = (it.next(), it.next()) else {
+                continue;
+            };
+            match k.trim() {
+                "allow_insecure_v1" => c.allow_insecure_v1 = v.trim() == "true",
+                "send_enabled" => c.send_enabled = v.trim() != "false",
+                "receive_enabled" => c.receive_enabled = v.trim() != "false",
+                "max_text_bytes" => c.max_text_bytes = v.trim().parse().unwrap_or(c.max_text_bytes),
+                _ => {}
+            }
+        }
+        c
+    }
     pub fn path() -> Option<PathBuf> {
         std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
