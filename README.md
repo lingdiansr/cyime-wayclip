@@ -164,3 +164,9 @@ cargo fmt --all -- --check
 cargo test --all-features
 cargo clippy --all-features --all-targets -- -D warnings
 ```
+
+### Sensitive content logging
+
+Clipboard text is never logged by default. `--show-content` (alias
+`--log-content`) opts into sensitive clipboard diagnostics for local debugging;
+use only on a trusted machine and disable it afterward.

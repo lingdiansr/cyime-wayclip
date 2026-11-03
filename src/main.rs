@@ -14,6 +14,12 @@ fn main() {
         std::env::set_var("CYIME_VERBOSITY", verbosity.to_string());
     }
     cyime_wayclip::logging::set_verbosity(verbosity);
+    if args
+        .iter()
+        .any(|a| a == "--show-content" || a == "--log-content")
+    {
+        cyime_wayclip::logging::set_show_content(true);
+    }
     let command = args
         .iter()
         .skip(1)
