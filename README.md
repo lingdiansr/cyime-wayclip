@@ -154,3 +154,13 @@ GitHub Actions 会在 push 和 pull request 时执行检查；推送 `v*` 标签
 Pass `-v`, `-vv`, or `-vvv` before the command to increase diagnostics. `-vvv`
 enables per-request server logging; verbosity is process-local and does not log
 clipboard contents or credentials. This replaces any need for `RUST_LOG`.
+
+## Local CI checks
+
+Run the same checks as CI before pushing:
+
+```sh
+cargo fmt --all -- --check
+cargo test --all-features
+cargo clippy --all-features --all-targets -- -D warnings
+```
