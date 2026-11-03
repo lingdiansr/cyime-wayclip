@@ -11,6 +11,7 @@ fn main() {
         Some("serve-v2") => serve_v2(args.get(2).map(String::as_str)),
         Some("pair") => pair(),
         Some("config") if args.get(2).map(String::as_str) == Some("init") => config_init(),
+        Some("service") => service(args.get(2).map(String::as_str)),
         Some("help") | Some("--help") | Some("-h") => help(),
         Some(x) => {
             eprintln!("unknown command: {x}");
@@ -28,6 +29,74 @@ fn help() {
     println!("  pair                 Print a v1 pairing code and origin");
     println!("  serve [ADDRESS]      Start the opt-in v1 HTTP server");
     println!("  serve-v2 [ADDRESS]   Start the HTTPS QR pairing server");
+    println!("  service install      Install the systemd user service");
+    println!("  service uninstall    Remove the systemd user service");
+    println!("  service status       Show systemd user service status");
+    println!("  service start|stop   Start or stop the user service");
+}
+
+fn service(action: Option<&str>) {
+    let Some(config_dir) = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+    else {
+        eprintln!("cannot determine XDG config directory");
+        std::process::exit(1);
+    };
+    let unit_dir = config_dir.join("systemd/user");
+    let unit_path = unit_dir.join("cyime-wayclip.service");
+    let action = action.unwrap_or("status");
+    match action {
+        "install" => {
+            if let Err(e) = std::fs::create_dir_all(&unit_dir).and_then(|_| {
+                let exe = std::env::current_exe()?.display().to_string();
+                let body = format!("[Unit]\nDescription=CyIME Wayclip clipboard synchronization\nAfter=graphical-session.target\n\n[Service]\nType=simple\nExecStart={exe} run\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=graphical-session.target\n");
+                std::fs::write(&unit_path, body)
+            }) { eprintln!("install service: {e}"); std::process::exit(1); }
+            println!("installed {}", unit_path.display());
+            let _ = systemctl_user(&["daemon-reload"]);
+            let _ = systemctl_user(&["enable", "--now", "cyime-wayclip.service"]);
+        }
+        "uninstall" => {
+            let _ = systemctl_user(&["disable", "--now", "cyime-wayclip.service"]);
+            if let Err(e) = std::fs::remove_file(&unit_path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("remove service: {e}");
+                }
+            }
+            let _ = systemctl_user(&["daemon-reload"]);
+            println!("removed {}", unit_path.display());
+        }
+        "start" => {
+            std::process::exit(systemctl_user(&["start", "cyime-wayclip.service"]));
+        }
+        "stop" => {
+            std::process::exit(systemctl_user(&["stop", "cyime-wayclip.service"]));
+        }
+        "restart" => {
+            std::process::exit(systemctl_user(&["restart", "cyime-wayclip.service"]));
+        }
+        "status" => {
+            std::process::exit(systemctl_user(&["status", "cyime-wayclip.service"]));
+        }
+        _ => {
+            eprintln!("usage: service install|uninstall|start|stop|restart|status");
+            std::process::exit(2);
+        }
+    }
+}
+fn systemctl_user(args: &[&str]) -> i32 {
+    match std::process::Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .status()
+    {
+        Ok(s) => s.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("systemctl --user: {e}");
+            1
+        }
+    }
 }
 
 fn config_init() {
@@ -89,7 +158,11 @@ fn serve(bind: Option<&str>) {
     let _ = bind;
     #[cfg(feature = "wayland")]
     {
-        let mut s = cyime_wayclip::server::Server::<()>::new(Config::default());
+        let config = Config::load().unwrap_or_else(|e| {
+            eprintln!("load config: {e}");
+            Config::default()
+        });
+        let mut s = cyime_wayclip::server::Server::<()>::new(config);
         s.mark_ready();
         let code = cyime_wayclip::protocol::generate_pairing_code();
         let uri = format!("http://{}", bind.unwrap_or("127.0.0.1:8765"));
@@ -177,7 +250,7 @@ fn serve_v2(bind: Option<&str>) {
             p.set_offer(offer);
             if let Err(e) = cyime_wayclip::http_server::serve_v2_tls(
                 addr,
-                cyime_wayclip::server::Server::new(Config::default()),
+                cyime_wayclip::server::Server::new(Config::load().unwrap_or_default()),
                 &id,
                 &mut p,
             ) {
