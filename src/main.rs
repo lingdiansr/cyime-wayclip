@@ -3,6 +3,16 @@ use cyime_wayclip::clipboard::{ClipboardProvider, UnavailableProvider};
 use cyime_wayclip::config::Config;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let verbosity = args
+        .iter()
+        .take(4)
+        .filter(|a| a.as_str().starts_with("-v"))
+        .map(|a| a.len())
+        .max()
+        .unwrap_or(0);
+    if verbosity > 0 {
+        std::env::set_var("CYIME_VERBOSITY", verbosity.to_string());
+    }
     match args.get(1).map(String::as_str) {
         Some("doctor") => doctor(),
         Some("status") => status(),
