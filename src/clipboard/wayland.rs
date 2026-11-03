@@ -161,3 +161,26 @@ impl DataControlProvider {
         Err(crate::protocol::ProfileError::InvalidUtf8)
     }
 }
+#[cfg(feature = "wayland")]
+pub fn copy_text(text: &str) -> Result<(), String> {
+    use wl_clipboard_rs::copy::{copy, ClipboardType, MimeType, Options, Seat, Source};
+    copy(
+        Options::new()
+            .clipboard(ClipboardType::Regular)
+            .seat(Seat::Unspecified)
+            .serve_requests(wl_clipboard_rs::copy::ServeRequests::Never),
+        Source::Bytes(text.as_bytes().to_vec().into()),
+        MimeType::Text,
+    )
+    .map_err(|e| e.to_string())
+}
+#[cfg(feature = "wayland")]
+pub fn paste_text() -> Result<String, String> {
+    use wl_clipboard_rs::paste::{get_contents, ClipboardType, MimeType, Seat};
+    let (mut pipe, _) = get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Text)
+        .map_err(|e| e.to_string())?;
+    use std::io::Read;
+    let mut s = String::new();
+    pipe.read_to_string(&mut s).map_err(|e| e.to_string())?;
+    Ok(s)
+}

@@ -19,7 +19,7 @@ name = "cyime-wayclip"
 path = "src/main.rs"
 
 [features]
-wayland = ["dep:wayland-client", "dep:wayland-protocols"]
+wayland = ["dep:wayland-client", "dep:wayland-protocols", "dep:wl-clipboard-rs"]
 
 [dependencies.wayland-client]
 version = "0.31"
@@ -28,4 +28,8 @@ optional = true
 [dependencies.wayland-protocols]
 version = "0.32"
 features = ["staging", "client"]
+optional = true
+
+[dependencies.wl-clipboard-rs]
+version = "0.9"
 optional = true
