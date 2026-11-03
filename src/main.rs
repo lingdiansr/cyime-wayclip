@@ -8,6 +8,7 @@ fn main() {
         Some("status") => status(),
         Some("run") | None => run(),
         Some("serve") => serve(args.get(2).map(String::as_str)),
+        Some("pair") => pair(),
         Some(x) => {
             eprintln!("unknown command: {x}");
             std::process::exit(2)
@@ -61,4 +62,10 @@ fn serve(bind: Option<&str>) {
     {
         eprintln!("serve requires --features wayland");
     }
+}
+
+fn pair() {
+    let code = cyime_wayclip::protocol::generate_pairing_code();
+    println!("pairing_code={code}");
+    println!("v1_uri=http://127.0.0.1:8765 (enter this origin in the Android Lua plugin)");
 }

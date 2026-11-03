@@ -8,7 +8,9 @@ pub use stamp::{compare_stamp, ApplyResult, Stamp};
 mod http;
 pub use http::{get, put, Direction, GetResult, HttpStatus, PutResult};
 mod pairing;
-pub use pairing::{decode_secret, encode_secret, token_digest, PairingError};
+pub use pairing::{
+    decode_secret, encode_secret, generate_pairing_code, token_digest, PairingError,
+};
 mod auth;
 pub use auth::TokenStore;
 mod qr;
