@@ -124,6 +124,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "if-addrs 0.13.4",
+ "libc",
  "mdns-sd",
  "qrcodegen",
  "rcgen",

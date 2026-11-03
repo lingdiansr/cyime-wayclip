@@ -97,6 +97,41 @@ fn private_options() -> OpenOptions {
     options
 }
 
+#[cfg(unix)]
+fn lock_registry(path: &Path) -> io::Result<File> {
+    use std::os::fd::AsRawFd;
+    let lock_path = path.with_extension("lock");
+    check_path(&lock_path)?;
+    let file = private_options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o777 != 0o600 {
+        return Err(invalid("credential lock must be a regular mode 0600 file"));
+    }
+    loop {
+        // SAFETY: this is an owned, live fd. flock only changes its advisory lock.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(file);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    // Closing the returned File releases the lock, including all error paths.
+}
+#[cfg(not(unix))]
+fn lock_registry(_: &Path) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "credential file locking requires Unix",
+    ))
+}
+
 impl DeviceRegistry {
     pub fn open(path: Option<PathBuf>) -> io::Result<Self> {
         let Some(file_path) = path.as_ref() else {
@@ -158,9 +193,29 @@ impl DeviceRegistry {
     }
 
     pub fn issue(&mut self, client_id: &str, name: &str) -> io::Result<(String, String)> {
+        self.transaction(|registry| registry.issue_unlocked(client_id, name))
+    }
+
+    fn issue_unlocked(&mut self, client_id: &str, name: &str) -> io::Result<(String, String)> {
         if client_id.is_empty() || client_id.len() > MAX_LABEL_BYTES || name.len() > MAX_LABEL_BYTES
         {
             return Err(invalid("invalid device client ID or name"));
+        }
+        if let Some(grant) = client_id.strip_prefix("grant:") {
+            let (owner, client) = grant
+                .split_once(':')
+                .ok_or_else(|| invalid("invalid grant client ID"))?;
+            if client.is_empty()
+                || !self
+                    .devices
+                    .iter()
+                    .any(|device| device.summary.device_id == owner)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "grant owner no longer exists",
+                ));
+            }
         }
         let index = self
             .devices
@@ -173,7 +228,9 @@ impl DeviceRegistry {
             .map_err(|_| io::Error::other("token encoding failed"))?;
         let device_id = match index {
             Some(i) => self.devices[i].summary.device_id.clone(),
-            None => hex::encode(random_bytes()?),
+            None => uuid::Builder::from_random_bytes(random_bytes()?[..16].try_into().unwrap())
+                .into_uuid()
+                .to_string(),
         };
         let device = Device {
             summary: DeviceSummary {
@@ -207,8 +264,29 @@ impl DeviceRegistry {
     }
 
     pub fn revoke(&mut self, id: &str) -> io::Result<bool> {
+        self.transaction(|registry| registry.revoke_unlocked(id))
+    }
+
+    fn revoke_unlocked(&mut self, id: &str) -> io::Result<bool> {
+        let mut revoked = std::collections::HashSet::from([id.to_owned()]);
+        loop {
+            let before = revoked.len();
+            for device in &self.devices {
+                if revoked.iter().any(|owner| {
+                    device
+                        .summary
+                        .client_id
+                        .starts_with(&format!("grant:{owner}:"))
+                }) {
+                    revoked.insert(device.summary.device_id.clone());
+                }
+            }
+            if revoked.len() == before {
+                break;
+            }
+        }
         let mut next = self.devices.clone();
-        next.retain(|device| device.summary.device_id != id);
+        next.retain(|device| !revoked.contains(&device.summary.device_id));
         if next.len() == self.devices.len() {
             return Ok(false);
         }
@@ -222,6 +300,19 @@ impl DeviceRegistry {
             .iter()
             .map(|device| device.summary.clone())
             .collect()
+    }
+
+    // A fresh snapshot must be loaded while holding the lock: stale handles must not
+    // resurrect a CLI-revoked credential when the HTTP worker subsequently issues one.
+    fn transaction<T>(&mut self, change: impl FnOnce(&mut Self) -> io::Result<T>) -> io::Result<T> {
+        let Some(path) = &self.path else {
+            return change(self);
+        };
+        let _lock = lock_registry(path)?;
+        let mut current = Self::open(Some(path.clone()))?;
+        let result = change(&mut current)?;
+        self.devices = current.devices;
+        Ok(result)
     }
 
     fn persist(&self, devices: &[Device]) -> io::Result<()> {
@@ -286,6 +377,106 @@ mod tests {
     impl Drop for Directory {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn issued_device_ids_are_v4_uuids() {
+        let mut registry = DeviceRegistry::open(None).unwrap();
+        let (id, _) = registry.issue("phone", "phone").unwrap();
+        let parsed = uuid::Uuid::parse_str(&id).unwrap();
+        assert_eq!(parsed.get_version_num(), 4);
+        assert_eq!(parsed.to_string(), id);
+    }
+
+    #[test]
+    fn stale_handle_cannot_resurrect_revoked_tokens_or_drop_new_devices() {
+        let directory = Directory::new();
+        let path = directory.file();
+        let mut first = DeviceRegistry::open(Some(path.clone())).unwrap();
+        let (id, revoked) = first.issue("phone", "phone").unwrap();
+        let mut stale = DeviceRegistry::open(Some(path.clone())).unwrap();
+        first.revoke(&id).unwrap();
+        let (_, fresh) = stale.issue("other", "other").unwrap();
+        let current = DeviceRegistry::open(Some(path.clone())).unwrap();
+        assert!(current.authenticate(&revoked).is_none());
+        assert!(current.authenticate(&fresh).is_some());
+        assert_eq!(current.list().len(), 1);
+        // First is now stale too: its next issuance must retain the second handle's addition.
+        first.issue("third", "third").unwrap();
+        let current = DeviceRegistry::open(Some(path)).unwrap();
+        assert!(current.authenticate(&fresh).is_some());
+        assert_eq!(current.list().len(), 2);
+    }
+
+    #[test]
+    fn revocation_cascades_through_grants_but_not_other_owners() {
+        let mut registry = DeviceRegistry::open(None).unwrap();
+        let (root, root_token) = registry.issue("root", "root").unwrap();
+        let (child, child_token) = registry
+            .issue(&format!("grant:{root}:child"), "child")
+            .unwrap();
+        let (_, grandchild_token) = registry
+            .issue(&format!("grant:{child}:nested"), "grandchild")
+            .unwrap();
+        let (_, unrelated) = registry.issue("other", "other").unwrap();
+        assert!(registry.revoke(&root).unwrap());
+        for token in [root_token, child_token, grandchild_token] {
+            assert!(registry.authenticate(&token).is_none());
+        }
+        assert!(registry.authenticate(&unrelated).is_some());
+        assert_eq!(registry.list().len(), 1);
+    }
+
+    #[test]
+    fn revoked_owner_cannot_issue_orphan_grant_through_stale_handle() {
+        let directory = Directory::new();
+        let path = directory.file();
+        let mut owner = DeviceRegistry::open(Some(path.clone())).unwrap();
+        let (id, token) = owner.issue("phone", "phone").unwrap();
+        let mut revoker = DeviceRegistry::open(Some(path.clone())).unwrap();
+        revoker.revoke(&id).unwrap();
+        // This old authenticated handle still has the parent's record in memory.
+        assert!(owner.authenticate(&token).is_some());
+        let error = owner
+            .issue(&format!("grant:{id}:orphan"), "orphan")
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(DeviceRegistry::open(Some(path)).unwrap().list().is_empty());
+        let mut memory = DeviceRegistry::open(None).unwrap();
+        assert!(memory.issue("grant:missing:orphan", "orphan").is_err());
+        assert!(memory.issue("grant:malformed", "orphan").is_err());
+        let (id, _) = memory.issue("real", "real").unwrap();
+        assert!(memory
+            .issue(&format!("grant:{id}:"), "empty client")
+            .is_err());
+        memory.revoke(&id).unwrap();
+        assert!(memory
+            .issue(&format!("grant:{id}:orphan"), "orphan")
+            .is_err());
+    }
+
+    #[test]
+    fn simultaneous_handles_serialize_issuance_without_lost_updates() {
+        let directory = Directory::new();
+        let path = directory.file();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let workers: Vec<_> = (0..2)
+            .map(|i| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let mut registry = DeviceRegistry::open(Some(path)).unwrap();
+                    barrier.wait();
+                    registry.issue(&format!("phone-{i}"), "phone").unwrap()
+                })
+            })
+            .collect();
+        let issued: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        let current = DeviceRegistry::open(Some(path)).unwrap();
+        assert_eq!(current.list().len(), 2);
+        for (id, token) in issued {
+            assert_eq!(current.authenticate(&token), Some(id));
         }
     }
 
