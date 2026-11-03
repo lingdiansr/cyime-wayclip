@@ -238,3 +238,5 @@ A+B+C约7～11人日；A+B+D约9～15人日；加跨桌面和E约3～5周量级�
 ## 当前实现运行说明
 
 `cyime-wayclip serve` 当前启动 v1 HTTP listener；默认仅绑定 `127.0.0.1:8765`，尚未实现 TLS。Android Lua v1 插件配置时使用 server origin（例如 `http://192.168.1.10:8765`），插件会访问 `/api/clipboard`，认证需按协议使用 Basic `cyime:<pairing-code>`。公网或不可信 LAN 不应启用；v2 HTTPS/pinning 仍待实现。
+
+Serve LAN example: `cyime-wayclip serve 192.168.1.10:8765`. Only bind a trusted private interface. Pairing codes must be transported out-of-band; v1 Basic authentication is plaintext on HTTP and is not suitable for hostile networks.
