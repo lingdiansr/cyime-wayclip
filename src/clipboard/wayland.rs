@@ -41,6 +41,15 @@ pub fn detect() -> WaylandCapabilities {
     }
 }
 impl WaylandCapabilities {
+    pub fn provider_status(&self) -> super::ProviderStatus {
+        if self.supports_data_control() {
+            super::ProviderStatus::Ready
+        } else if self.connected {
+            super::ProviderStatus::Unsupported
+        } else {
+            super::ProviderStatus::Disconnected
+        }
+    }
     pub fn supports_data_control(&self) -> bool {
         self.globals.iter().any(|g| g.contains("data_control"))
     }
