@@ -191,6 +191,43 @@ impl ServerCertVerifier for Pin {
             .supported_schemes()
     }
 }
+/// Bounds every underlying TLS I/O, including internal handshake/trickle reads.
+struct DeadlineStream {
+    socket: TcpStream,
+    deadline: Instant,
+}
+impl DeadlineStream {
+    fn remaining(&self) -> io::Result<Duration> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "peer request deadline",
+            ));
+        }
+        Ok(Duration::from_secs(3).min(remaining))
+    }
+}
+impl Read for DeadlineStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.socket.set_read_timeout(Some(self.remaining()?))?;
+        let result = self.socket.read(buf);
+        self.remaining()?;
+        result
+    }
+}
+impl Write for DeadlineStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.socket.set_write_timeout(Some(self.remaining()?))?;
+        let result = self.socket.write(buf);
+        self.remaining()?;
+        result
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.remaining()?;
+        self.socket.flush()
+    }
+}
 /// Real HTTPS POST; redirects are returned as statuses, never followed.
 pub fn post_json(peer: &Peer, path: &str, body: &Value) -> io::Result<(u16, Option<Value>)> {
     request(peer, "POST", path, body, None)
@@ -216,16 +253,15 @@ fn request(
         return Err(invalid("request too large"));
     }
     let socket = TcpStream::connect_timeout(&addr, Duration::from_secs(3))?;
-    socket.set_read_timeout(Some(Duration::from_secs(3)))?;
-    socket.set_write_timeout(Some(Duration::from_secs(3)))?;
+    let deadline = Instant::now() + Duration::from_secs(12);
     if let Some((shared, slot, owner, generation)) = cancel {
         let mut state = shared.state.lock().unwrap();
         if state.stop
             || !state.enabled
-            || !state
+            || state
                 .entries
                 .get(owner)
-                .is_some_and(|e| e.generation == generation)
+                .is_none_or(|e| e.generation != generation)
         {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
@@ -248,23 +284,14 @@ fn request(
     let conn =
         rustls::ClientConnection::new(Arc::new(config), ServerName::IpAddress(addr.ip().into()))
             .map_err(|_| invalid("TLS configuration"))?;
-    let mut stream = rustls::StreamOwned::new(conn, socket);
-    let deadline = Instant::now() + Duration::from_secs(9);
+    let mut stream = rustls::StreamOwned::new(conn, DeadlineStream { socket, deadline });
     write!(stream, "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", peer.token, data.len())?;
     stream.write_all(&data)?;
     stream.flush()?;
     let mut response = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "peer response deadline",
-            ));
-        }
-        stream.sock.set_read_timeout(Some(
-            Duration::from_secs(3).min(deadline.saturating_duration_since(Instant::now())),
-        ))?;
+        stream.sock.remaining()?;
         let n = match stream.read(&mut buf) {
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => 0,
@@ -287,6 +314,7 @@ fn request(
             }
         }
     }
+    stream.sock.remaining()?;
     parse_response(&response)
 }
 fn header_end(bytes: &[u8]) -> Option<usize> {
@@ -415,6 +443,8 @@ struct Entry {
     failed: bool,
     busy: bool,
     pending: Option<Pending>,
+    control: Option<Pending>,
+    control_blocked: bool,
 }
 struct State {
     entries: BTreeMap<String, Entry>,
@@ -429,6 +459,7 @@ struct Shared {
     wake: Condvar,
 }
 struct Manager {
+    mesh_request: Mutex<()>,
     shared: Arc<Shared>,
     path: Option<PathBuf>,
 }
@@ -470,6 +501,8 @@ impl PeerManager {
                     failed: false,
                     busy: false,
                     pending: None,
+                    control: None,
+                    control_blocked: false,
                 },
             );
         }
@@ -480,12 +513,13 @@ impl PeerManager {
                 persistence_dirty: false,
                 enabled: true,
                 stop: false,
-                sockets: (0..WORKERS).map(|_| None).collect(),
+                sockets: (0..=WORKERS).map(|_| None).collect(),
             }),
             wake: Condvar::new(),
         });
         let manager = Self {
             inner: Arc::new(Manager {
+                mesh_request: Mutex::new(()),
                 shared: shared.clone(),
                 path,
             }),
@@ -497,6 +531,65 @@ impl PeerManager {
                 .spawn(move || worker(shared, slot))?;
         }
         Ok(manager)
+    }
+    /// Secret-bearing snapshots are for the authenticated mesh coordinator only.
+    pub fn snapshot(&self) -> Vec<(String, Peer)> {
+        self.inner
+            .shared
+            .state
+            .lock()
+            .unwrap()
+            .entries
+            .iter()
+            .map(|(owner, entry)| (owner.clone(), entry.peer.clone()))
+            .collect()
+    }
+    /// One coordinator may make synchronous control requests; never call this
+    /// blocking method on the HTTP listener. It shares all revocation checks.
+    pub fn post_owned(
+        &self,
+        owner: &str,
+        path: &str,
+        body: &Value,
+    ) -> io::Result<(u16, Option<Value>)> {
+        let _serial = self.inner.mesh_request.lock().unwrap();
+        let shared = &self.inner.shared;
+        let (generation, peer) = {
+            let state = shared.state.lock().unwrap();
+            if state.stop || !state.enabled {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "peer sending paused",
+                ));
+            }
+            let entry = state
+                .entries
+                .get(owner)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "peer owner not found"))?;
+            (entry.generation, entry.peer.clone())
+        };
+        let result = request(
+            &peer,
+            "POST",
+            path,
+            body,
+            Some((shared, WORKERS, owner, generation)),
+        );
+        let mut state = shared.state.lock().unwrap();
+        state.sockets[WORKERS] = None;
+        if state.stop
+            || !state.enabled
+            || state
+                .entries
+                .get(owner)
+                .is_none_or(|e| e.generation != generation)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "peer owner revoked or paused",
+            ));
+        }
+        result
     }
     pub fn register(&self, owner_id: &str, peer: Peer) -> io::Result<()> {
         peer.validate()?;
@@ -527,6 +620,8 @@ impl PeerManager {
                 failed: false,
                 busy: false,
                 pending: None,
+                control: None,
+                control_blocked: false,
             },
         );
         self.save(&entries)?;
@@ -537,6 +632,38 @@ impl PeerManager {
             }
         }
         state.entries = entries;
+        self.inner.shared.wake.notify_all();
+        Ok(())
+    }
+    /// Queue a pinned reverse registration without blocking the HTTP listener.
+    /// A paused manager rejects this operation; callers must reintroduce after resume.
+    pub fn register_back(&self, owner: &str, body: Value) -> io::Result<()> {
+        if !body.is_object() || serde_json::to_vec(&body)?.len() > LIMIT {
+            return Err(invalid("invalid reverse registration body"));
+        }
+        let mut state = self.inner.shared.state.lock().unwrap();
+        if !state.entries.contains_key(owner) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "peer owner not found",
+            ));
+        }
+        if !state.enabled {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "peer sending paused",
+            ));
+        }
+        state.sequence += 1;
+        let sequence = state.sequence;
+        let entry = state.entries.get_mut(owner).unwrap();
+        entry.control = Some(Pending {
+            body,
+            sequence,
+            attempt: 0,
+            due: Instant::now(),
+        });
+        entry.control_blocked = true;
         self.inner.shared.wake.notify_all();
         Ok(())
     }
@@ -600,6 +727,7 @@ impl PeerManager {
             let generation = state.sequence;
             for entry in state.entries.values_mut() {
                 entry.pending = None;
+                entry.control = None;
                 entry.busy = false;
                 entry.generation = generation;
             }
@@ -672,7 +800,7 @@ impl PeerManager {
 }
 fn worker(shared: Arc<Shared>, slot: usize) {
     loop {
-        let (owner, generation, peer, pending) = {
+        let (owner, generation, peer, pending, control) = {
             let mut state = shared.state.lock().unwrap();
             loop {
                 if state.stop {
@@ -683,27 +811,41 @@ fn worker(shared: Arc<Shared>, slot: usize) {
                     continue;
                 }
                 let now = Instant::now();
-                let ready = state
-                    .entries
-                    .iter()
-                    .find(|(_, e)| !e.busy && e.pending.as_ref().is_some_and(|p| p.due <= now))
-                    .map(|(k, _)| k.clone());
-                if let Some(owner) = ready {
+                let next = |e: &Entry| {
+                    e.control.as_ref().map(|p| (p.due, true)).or_else(|| {
+                        if e.control_blocked {
+                            None
+                        } else {
+                            e.pending.as_ref().map(|p| (p.due, false))
+                        }
+                    })
+                };
+                let ready = state.entries.iter().find_map(|(k, e)| {
+                    if !e.busy {
+                        next(e)
+                            .filter(|(due, _)| *due <= now)
+                            .map(|(_, control)| (k.clone(), control))
+                    } else {
+                        None
+                    }
+                });
+                if let Some((owner, control)) = ready {
                     let e = state.entries.get_mut(&owner).unwrap();
                     e.busy = true;
-                    break (
-                        owner,
-                        e.generation,
-                        e.peer.clone(),
-                        e.pending.take().unwrap(),
-                    );
+                    let pending = if control {
+                        e.control.take()
+                    } else {
+                        e.pending.take()
+                    }
+                    .unwrap();
+                    break (owner, e.generation, e.peer.clone(), pending, control);
                 }
                 let delay = state
                     .entries
                     .values()
                     .filter(|e| !e.busy)
-                    .filter_map(|e| e.pending.as_ref())
-                    .map(|p| p.due.saturating_duration_since(now))
+                    .filter_map(next)
+                    .map(|(due, _)| due.saturating_duration_since(now))
                     .min();
                 state = match delay {
                     Some(d) => shared.wake.wait_timeout(state, d).unwrap().0,
@@ -713,8 +855,12 @@ fn worker(shared: Arc<Shared>, slot: usize) {
         };
         let result = request(
             &peer,
-            "PUT",
-            "/api/clipboard",
+            if control { "POST" } else { "PUT" },
+            if control {
+                "/api/peer"
+            } else {
+                "/api/clipboard"
+            },
             &pending.body,
             Some((&shared, slot, &owner, generation)),
         );
@@ -733,9 +879,14 @@ fn worker(shared: Arc<Shared>, slot: usize) {
             let permanent = result
                 .as_ref()
                 .is_ok_and(|(s, _)| matches!(s, 400 | 401 | 403 | 413 | 415));
+            let queue = if control {
+                &mut e.control
+            } else {
+                &mut e.pending
+            };
             if !success
                 && !permanent
-                && e.pending
+                && queue
                     .as_ref()
                     .is_none_or(|p| p.sequence <= pending.sequence)
             {
@@ -743,7 +894,13 @@ fn worker(shared: Arc<Shared>, slot: usize) {
                 let mut retry = pending;
                 retry.due = Instant::now() + Duration::from_secs(delays[retry.attempt.min(2)]);
                 retry.attempt = (retry.attempt + 1).min(2);
-                e.pending = Some(retry);
+                *queue = Some(retry);
+            }
+            if control && success && e.control.is_none() {
+                e.control_blocked = false;
+            }
+            if control && permanent && e.control.is_none() {
+                e.pending = None;
             }
         }
         shared.wake.notify_all();
@@ -961,6 +1118,218 @@ mod tests {
             .is_empty());
         drop(manager);
         fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn owned_posts_use_cancellable_mesh_slot_and_snapshot_is_independent() {
+        let (server, peer) = server();
+        let manager = PeerManager::open(None).unwrap();
+        assert_eq!(
+            manager
+                .post_owned("missing", "/api/grant", &payload())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        for pause in [false, true] {
+            manager.register("owner", peer.clone()).unwrap();
+            let mut snapshot = manager.snapshot();
+            assert_eq!(snapshot.len(), 1);
+            assert_eq!(snapshot[0].0, "owner");
+            assert_eq!(snapshot[0].1.token, peer.token);
+            snapshot[0].1.token.clear();
+            assert_eq!(manager.back("owner").unwrap().token, peer.token);
+            let cloned = manager.clone();
+            let job = thread::spawn(move || {
+                cloned.post_owned(
+                    "owner",
+                    "/api/grant",
+                    &serde_json::json!({"client_id":"mesh"}),
+                )
+            });
+            let mut req = server
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            assert_eq!(req.url(), "/api/grant");
+            assert_eq!(req.method(), &tiny_http::Method::Post);
+            let mut bytes = Vec::new();
+            req.as_reader().read_to_end(&mut bytes).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&bytes).unwrap()["client_id"],
+                "mesh"
+            );
+            assert!(manager.inner.shared.state.lock().unwrap().sockets[WORKERS].is_some());
+            if pause {
+                manager.set_enabled(false);
+            } else {
+                manager.remove_owner("owner").unwrap();
+            }
+            assert_eq!(
+                job.join().unwrap().unwrap_err().kind(),
+                io::ErrorKind::Interrupted
+            );
+            assert!(manager.inner.shared.state.lock().unwrap().sockets[WORKERS].is_none());
+            drop(req);
+            if pause {
+                manager.set_enabled(true);
+            }
+        }
+        assert!(server
+            .recv_timeout(Duration::from_millis(50))
+            .unwrap()
+            .is_none());
+        server.unblock();
+    }
+    #[test]
+    fn deadline_stream_expiry_and_trickling_reads_have_absolute_bound() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut remote, _) = listener.accept().unwrap();
+        let mut stream = DeadlineStream {
+            socket,
+            deadline: Instant::now() - Duration::from_millis(1),
+        };
+        assert_eq!(
+            stream.read(&mut [0]).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert_eq!(
+            stream.write(b"x").unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert_eq!(stream.flush().unwrap_err().kind(), io::ErrorKind::TimedOut);
+        let writer = thread::spawn(move || {
+            for _ in 0..10 {
+                let _ = remote.write_all(b"x");
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let started = Instant::now();
+        stream.deadline = started + Duration::from_millis(35);
+        let mut count = 0;
+        while stream.read(&mut [0]).is_ok() {
+            count += 1;
+        }
+        assert!(count > 0, "trickle did not deliver initial data");
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(count < 10, "trickle extended the overall deadline");
+        drop(stream);
+        writer.join().unwrap();
+    }
+    #[test]
+    fn reverse_registration_has_its_own_latest_slot_and_precedes_clipboard() {
+        let (server, peer) = server();
+        let manager = PeerManager::open(None).unwrap();
+        manager.register("owner", peer.clone()).unwrap();
+        let secret = URL_SAFE_NO_PAD.encode([23u8; 32]);
+        let mut body = payload();
+        body["reflected_token"] = secret.clone().into();
+        manager.register_back("owner", body.clone()).unwrap();
+        let mut first = server
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.method(), &tiny_http::Method::Post);
+        assert_eq!(first.url(), "/api/peer");
+        let mut bytes = Vec::new();
+        first.as_reader().read_to_end(&mut bytes).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), body);
+        // While control is in flight, neither clipboard nor a newer control
+        // can overwrite the other's slot; the failed old control cannot return.
+        manager.publish(serde_json::json!({"stamp": 1}));
+        body["name"] = "new control".into();
+        manager.register_back("owner", body.clone()).unwrap();
+        manager.publish(serde_json::json!({"stamp": 2}));
+        first.respond(tiny_http::Response::empty(500)).unwrap();
+        let mut second = server
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.url(), "/api/peer");
+        bytes.clear();
+        second.as_reader().read_to_end(&mut bytes).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), body);
+        assert!(!format!("{:?}", peer).contains(&peer.token));
+        assert!(!format!("{:?}", peer).contains(&secret));
+        manager.publish(serde_json::json!({"stamp": 3}));
+        second.respond(tiny_http::Response::empty(200)).unwrap();
+        let mut clipboard = server
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(clipboard.method(), &tiny_http::Method::Put);
+        assert_eq!(clipboard.url(), "/api/clipboard");
+        bytes.clear();
+        clipboard.as_reader().read_to_end(&mut bytes).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["stamp"], 3);
+        clipboard.respond(tiny_http::Response::empty(200)).unwrap();
+        assert!(server
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap()
+            .is_none());
+        server.unblock();
+    }
+    #[test]
+    fn revoke_and_pause_cancel_reverse_registration_and_do_not_resurrect_tokens() {
+        let (server, peer) = server();
+        let manager = PeerManager::open(None).unwrap();
+        assert_eq!(
+            manager
+                .register_back("missing", payload())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        for pause in [false, true] {
+            manager.register("owner", peer.clone()).unwrap();
+            manager.register_back("owner", payload()).unwrap();
+            let request = server
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            manager.publish(serde_json::json!({"stamp": 1}));
+            if pause {
+                manager.set_enabled(false);
+            } else {
+                manager.remove_owner("owner").unwrap();
+            }
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while manager
+                .inner
+                .shared
+                .state
+                .lock()
+                .unwrap()
+                .sockets
+                .iter()
+                .any(Option::is_some)
+            {
+                assert!(Instant::now() < deadline, "control did not cancel");
+                thread::sleep(Duration::from_millis(5));
+            }
+            drop(request);
+            if pause {
+                assert_eq!(
+                    manager
+                        .register_back("owner", payload())
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::PermissionDenied
+                );
+                let state = manager.inner.shared.state.lock().unwrap();
+                assert!(state.entries["owner"].control.is_none());
+                assert!(state.entries["owner"].pending.is_none());
+                assert!(state.entries["owner"].control_blocked);
+                drop(state);
+                manager.set_enabled(true);
+                manager.publish(serde_json::json!({"stamp": 2}));
+            }
+            assert!(server
+                .recv_timeout(Duration::from_millis(100))
+                .unwrap()
+                .is_none());
+        }
+        server.unblock();
     }
     #[test]
     fn pause_discards_retries_and_cancels_active_without_replaying_on_resume() {
