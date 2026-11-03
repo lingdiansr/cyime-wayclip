@@ -13,3 +13,7 @@ thiserror = "2"
 
 [dev-dependencies]
 hex = "0.4"
+
+[[bin]]
+name = "cyime-wayclip"
+path = "src/main.rs"
