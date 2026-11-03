@@ -27,5 +27,5 @@ optional = true
 
 [dependencies.wayland-protocols]
 version = "0.32"
-features = ["staging"]
+features = ["staging", "client"]
 optional = true

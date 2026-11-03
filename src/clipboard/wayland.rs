@@ -115,3 +115,32 @@ mod ext_tests {
         assert!(has_ext_data_control(&c));
     }
 }
+#[cfg(feature = "wayland")]
+pub struct DataControlProvider {
+    pub capabilities: WaylandCapabilities,
+}
+#[cfg(feature = "wayland")]
+impl DataControlProvider {
+    pub fn new(capabilities: WaylandCapabilities) -> Option<Self> {
+        if has_ext_data_control(&capabilities) {
+            Some(Self { capabilities })
+        } else {
+            None
+        }
+    }
+    pub fn is_bound(&self) -> bool {
+        has_ext_data_control(&self.capabilities)
+    }
+}
+#[cfg(test)]
+mod provider_tests {
+    use super::*;
+    #[test]
+    fn binds_only_when_advertised() {
+        let c = WaylandCapabilities {
+            connected: true,
+            globals: vec!["ext_data_control_manager_v1".into()],
+        };
+        assert!(DataControlProvider::new(c).unwrap().is_bound());
+    }
+}
