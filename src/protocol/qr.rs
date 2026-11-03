@@ -96,6 +96,31 @@ mod tests {
 }
 
 #[allow(dead_code)]
+pub fn encode_compact_offer(offer: &PairOffer) -> Result<String, OfferError> {
+    let ep = offer.endpoints.first().ok_or(OfferError::Endpoints)?;
+    let rest = ep.strip_prefix("https://").ok_or(OfferError::Endpoint)?;
+    let (host, port) = rest.rsplit_once(':').ok_or(OfferError::Endpoint)?;
+    let ip: std::net::Ipv4Addr = host.parse().map_err(|_| OfferError::Endpoint)?;
+    let port: u16 = port.parse().map_err(|_| OfferError::Endpoint)?;
+    let cert = hex::decode(&offer.certificate_sha256).map_err(|_| OfferError::Pin)?;
+    if cert.len() != 32 {
+        return Err(OfferError::Pin);
+    }
+    let secret = decode_secret(&offer.secret)?;
+    let mut b = vec![2, 1];
+    b.extend(ip.octets());
+    b.extend(port.to_be_bytes());
+    b.extend([0u8; 16]);
+    b.extend(cert);
+    b.extend([0u8; 16]);
+    b.extend(secret);
+    b.extend(offer.expires_at.to_be_bytes());
+    Ok(format!(
+        "cyime://pair?v=2&c={}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+    ))
+}
+
 pub fn encode_pair_uri(offer: &PairOffer) -> Result<String, OfferError> {
     let json = serde_json::to_vec(offer).map_err(|_| OfferError::Json)?;
     Ok(format!(
