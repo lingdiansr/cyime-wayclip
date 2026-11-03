@@ -8,6 +8,7 @@ use std::io::Read;
 pub fn serve_v1(addr: &str, mut state: Server<()>, pairing_code: &str) -> std::io::Result<()> {
     let server = tiny_http::Server::http(addr).map_err(std::io::Error::other)?;
     for mut req in server.incoming_requests() {
+        crate::logging::log(3, format!("v1 request {} {}", req.method(), req.url()));
         let url = req.url().to_string();
         let (status, body, etag) =
             if url == "/api/clipboard" && req.method() == &tiny_http::Method::Get {
@@ -64,6 +65,7 @@ pub fn serve_v2_tls(
     let mut clipboard: Option<serde_json::Value> = None;
     for mut req in server.incoming_requests() {
         let path = req.url().to_string();
+        crate::logging::log(3, format!("v2 request {:?} {}", req.method(), path));
         if path == "/api/pair" {
             let mut b = Vec::new();
             req.as_reader().read_to_end(&mut b)?;

@@ -148,3 +148,9 @@ GitHub Actions 会在 push 和 pull request 时执行检查；推送 `v*` 标签
 当前版本：`0.1.0`。
 
 本项目与 Android 端 CyIME 一致，采用 GNU General Public License v3.0 或更高版本（GPL-3.0-or-later）。详见 [LICENSE](LICENSE) 和 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+## Verbosity
+
+Pass `-v`, `-vv`, or `-vvv` before the command to increase diagnostics. `-vvv`
+enables per-request server logging; verbosity is process-local and does not log
+clipboard contents or credentials. This replaces any need for `RUST_LOG`.
