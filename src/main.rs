@@ -94,15 +94,16 @@ fn pair() {
 
 fn serve_v2(bind: Option<&str>) {
     let addr = bind.unwrap_or("0.0.0.0:9876");
-    let host = if addr.starts_with("0.0.0.0:") {
-        discover_lan_host().unwrap_or_else(|| "127.0.0.1".into())
+    let hosts = if addr.starts_with("0.0.0.0:") {
+        discover_lan_hosts()
     } else {
-        addr.split(':').next().unwrap_or("").into()
+        vec![addr.split(':').next().unwrap_or("").into()]
     };
-    if host == "0.0.0.0" || host == "127.0.0.1" || host == "localhost" {
-        eprintln!("serve-v2 requires a reachable LAN host (e.g. 192.168.1.10:9876), not {addr}");
+    if hosts.is_empty() || hosts.iter().all(|h| h == "127.0.0.1" || h == "localhost") {
+        eprintln!("serve-v2 requires a reachable LAN host");
         return;
     }
+    let port = addr.rsplit_once(':').map(|x| x.1).unwrap_or("9876");
     match cyime_wayclip::tls::generate_identity("localhost") {
         Ok(id) => {
             let secret = cyime_wayclip::protocol::encode_secret(&[9; 32]).unwrap();
@@ -113,7 +114,17 @@ fn serve_v2(bind: Option<&str>) {
                 certificate_sha256: id.fingerprint.clone(),
                 pairing_id: "pairing".into(),
                 secret: secret.clone(),
-                endpoints: vec![format!("https://{}", addr.replace("0.0.0.0", &host))],
+                endpoints: hosts
+                    .iter()
+                    .take(8)
+                    .map(|h| {
+                        format!(
+                            "https://{}:{}",
+                            h,
+                            addr.rsplit_once(':').map(|x| x.1).unwrap_or("9876")
+                        )
+                    })
+                    .collect(),
                 expires_at: 4102444800,
             };
             let uri = cyime_wayclip::protocol::encode_pair_uri(&offer).unwrap();
@@ -135,9 +146,15 @@ fn serve_v2(bind: Option<&str>) {
     }
 }
 
-fn discover_lan_host() -> Option<String> {
+fn discover_lan_hosts() -> Vec<String> {
     use std::net::UdpSocket;
-    let s = UdpSocket::bind("0.0.0.0:0").ok()?;
-    s.connect("192.0.2.1:9").ok()?;
-    Some(s.local_addr().ok()?.ip().to_string())
+    let mut v = Vec::new();
+    if let Ok(s) = UdpSocket::bind("0.0.0.0:0") {
+        if s.connect("192.0.2.1:9").is_ok() {
+            if let Ok(a) = s.local_addr() {
+                v.push(a.ip().to_string())
+            }
+        }
+    }
+    v
 }
