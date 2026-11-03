@@ -1,9 +1,10 @@
+use crate::protocol::valid_basic;
 use crate::{
     protocol::{GetResult, PutResult},
     server::Server,
 };
 use std::io::Read;
-pub fn serve_v1(addr: &str, mut state: Server<()>) -> std::io::Result<()> {
+pub fn serve_v1(addr: &str, mut state: Server<()>, pairing_code: &str) -> std::io::Result<()> {
     let server = tiny_http::Server::http(addr).map_err(std::io::Error::other)?;
     for mut req in server.incoming_requests() {
         let url = req.url().to_string();
@@ -19,7 +20,13 @@ pub fn serve_v1(addr: &str, mut state: Server<()>) -> std::io::Result<()> {
             } else if url == "/api/clipboard" && req.method() == &tiny_http::Method::Put {
                 let mut b = Vec::new();
                 req.as_reader().take(262145).read_to_end(&mut b)?;
-                match state.put(&b, true) {
+                let auth = req
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Authorization"))
+                    .map(|h| valid_basic(h.value.as_str(), pairing_code))
+                    .unwrap_or(false);
+                match state.put(&b, auth) {
                     PutResult::Accepted(p) => (200, serde_json::to_vec(&p).unwrap(), None),
                     PutResult::Unauthorized => (401, vec![], None),
                     PutResult::Forbidden => (403, vec![], None),
