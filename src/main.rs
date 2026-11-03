@@ -18,7 +18,12 @@ fn main() {
         .skip(1)
         .find(|a| !a.starts_with('-'))
         .map(String::as_str);
-    let positional: Vec<&str> = args.iter().skip(1).filter(|a| !a.starts_with("-v")).map(String::as_str).collect();
+    let positional: Vec<&str> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with("-v"))
+        .map(String::as_str)
+        .collect();
     match command {
         Some("doctor") => doctor(),
         Some("status") => status(),
@@ -158,6 +163,9 @@ fn run() {
     {
         let c = cyime_wayclip::clipboard::wayland::detect();
         println!("{}", c.diagnostic());
+        if std::env::var("CYIME_VERBOSITY").is_ok() {
+            eprintln!("Wayland globals: {:?}", c.globals);
+        }
         if c.provider_status() == cyime_wayclip::clipboard::ProviderStatus::Ready {
             let addr =
                 std::env::var("CYIME_WAYCLIP_BIND").unwrap_or_else(|_| "0.0.0.0:9876".into());

@@ -5,6 +5,16 @@ use crate::{
 };
 use sha2::Digest;
 use std::io::Read;
+fn vlog(level: u8, msg: impl std::fmt::Display) {
+    if std::env::var("CYIME_VERBOSITY")
+        .ok()
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(0)
+        >= level
+    {
+        eprintln!("[v{level}] {msg}");
+    }
+}
 pub fn serve_v1(addr: &str, mut state: Server<()>, pairing_code: &str) -> std::io::Result<()> {
     let server = tiny_http::Server::http(addr).map_err(std::io::Error::other)?;
     for mut req in server.incoming_requests() {
@@ -53,6 +63,7 @@ pub fn serve_v2_tls(
     identity: &crate::tls::Identity,
     pairing: &mut crate::protocol::PairingService,
 ) -> std::io::Result<()> {
+    vlog(1, format!("starting HTTPS listener on {addr}"));
     let server = tiny_http::Server::https(
         addr,
         tiny_http::SslConfig {
@@ -65,6 +76,7 @@ pub fn serve_v2_tls(
     let mut clipboard: Option<serde_json::Value> = None;
     for mut req in server.incoming_requests() {
         let path = req.url().to_string();
+        vlog(2, format!("request method={:?} path={path}", req.method()));
         crate::logging::log(3, format!("v2 request {:?} {}", req.method(), path));
         if path == "/api/pair" {
             let mut b = Vec::new();
