@@ -61,6 +61,7 @@ pub fn serve_v2_tls(
     )
     .map_err(std::io::Error::other)?;
     let mut token: Option<String> = None;
+    let mut clipboard: Option<serde_json::Value> = None;
     for mut req in server.incoming_requests() {
         let path = req.url().to_string();
         if path == "/api/pair" {
@@ -100,6 +101,46 @@ pub fn serve_v2_tls(
                 }
             };
             req.respond(tiny_http::Response::from_data(body).with_status_code(code))?;
+        } else if path == "/api/clipboard" {
+            let auth = req
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Authorization"))
+                .and_then(|h| h.value.as_str().strip_prefix("Bearer "))
+                .map(|v| token.as_deref() == Some(v.trim()))
+                .unwrap_or(false);
+            if !auth {
+                req.respond(tiny_http::Response::empty(401))?;
+                continue;
+            }
+            if req.method() == &tiny_http::Method::Get {
+                if let Some(v) = clipboard.as_ref() {
+                    let hash = v.get("hash").and_then(|x| x.as_str()).unwrap_or("");
+                    let inm = req
+                        .headers()
+                        .iter()
+                        .find(|h| h.field.equiv("If-None-Match"))
+                        .map(|h| h.value.as_str().trim_matches('"'));
+                    if inm == Some(hash) {
+                        req.respond(tiny_http::Response::empty(304))?;
+                    } else {
+                        req.respond(
+                            tiny_http::Response::from_string(v.to_string()).with_status_code(200),
+                        )?;
+                    }
+                } else {
+                    req.respond(tiny_http::Response::empty(204))?;
+                }
+            } else if req.method() == &tiny_http::Method::Put {
+                let mut b = Vec::new();
+                req.as_reader().read_to_end(&mut b)?;
+                let v: serde_json::Value = serde_json::from_slice(&b)
+                    .map_err(|_| std::io::Error::other("invalid clipboard JSON"))?;
+                clipboard = Some(v.clone());
+                req.respond(tiny_http::Response::from_string(v.to_string()).with_status_code(200))?;
+            } else {
+                req.respond(tiny_http::Response::empty(405))?;
+            }
         } else if path == "/api/status" {
             let auth = req
                 .headers()
