@@ -128,9 +128,12 @@ pub fn serve_v2_tls(
                         );
                         req.respond(resp)?;
                     } else {
-                        req.respond(
-                            tiny_http::Response::from_string(v.to_string()).with_status_code(200),
-                        )?;
+                        let mut resp =
+                            tiny_http::Response::from_string(v.to_string()).with_status_code(200);
+                        resp.add_header(
+                            tiny_http::Header::from_bytes(&b"ETag"[..], hash.as_bytes()).unwrap(),
+                        );
+                        req.respond(resp)?;
                     }
                 } else {
                     req.respond(tiny_http::Response::empty(204))?;
