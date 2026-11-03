@@ -47,7 +47,7 @@ pub fn serve_v1(addr: &str, mut state: Server<()>, pairing_code: &str) -> std::i
 
 pub fn serve_v2_tls(
     addr: &str,
-    state: Server<()>,
+    _state: Server<()>,
     identity: &crate::tls::Identity,
     pairing: &mut crate::protocol::PairingService,
 ) -> std::io::Result<()> {

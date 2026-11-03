@@ -8,7 +8,7 @@ pub struct Identity {
 pub fn generate_identity(name: &str) -> Result<Identity, String> {
     let c = generate_simple_self_signed(vec![name.into()]).map_err(|e| e.to_string())?;
     let cert = c.cert.der().to_vec();
-    let key = c.signing_key.serialize_der();
+    let key = c.key_pair.serialize_der();
     let fingerprint = Sha256::digest(&cert)
         .iter()
         .map(|b| format!("{b:02x}"))

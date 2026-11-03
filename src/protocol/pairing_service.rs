@@ -11,7 +11,7 @@ pub enum PairError {
     #[error("invalid secret")]
     Secret,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PairResponse {
     pub v: u8,
     pub server_id: String,

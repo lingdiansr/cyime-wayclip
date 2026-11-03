@@ -14,7 +14,7 @@ pub use pairing::{
 mod auth;
 pub use auth::TokenStore;
 mod qr;
-pub use qr::{OfferError, PairOffer};
+pub use qr::{encode_pair_uri, OfferError, PairOffer};
 mod status;
 pub use status::SyncStatus;
 mod pairing_service;
