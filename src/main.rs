@@ -93,7 +93,12 @@ fn pair() {
 }
 
 fn serve_v2(bind: Option<&str>) {
-    let addr = bind.unwrap_or("127.0.0.1:9876");
+    let addr = bind.unwrap_or("0.0.0.0:9876");
+    let host = addr.split(':').next().unwrap_or("");
+    if host == "0.0.0.0" || host == "127.0.0.1" || host == "localhost" {
+        eprintln!("serve-v2 requires a reachable LAN host (e.g. 192.168.1.10:9876), not {addr}");
+        return;
+    }
     match cyime_wayclip::tls::generate_identity("localhost") {
         Ok(id) => {
             let secret = cyime_wayclip::protocol::encode_secret(&[9; 32]).unwrap();
