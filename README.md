@@ -63,9 +63,12 @@ systemd 用户服务可在 unit 的 `[Service]` 中设置 `Environment=CYIME_WAY
 从 [CyIME Wayclip Releases](https://github.com/lingdiansr/cyime-wayclip/releases) 下载 Linux x86_64 tarball：
 
 ```sh
-tar -xzf cyime-wayclip-0.2.0-x86_64-unknown-linux-gnu.tar.gz
-install -Dm755 cyime-wayclip-*/usr/bin/cyime-wayclip ~/.local/bin/cyime-wayclip
+tar -xzf cyime-wayclip_0.2.0_x86_64.tar.gz
+install -Dm755 cyime-wayclip_0.2.0_x86_64/usr/bin/cyime-wayclip ~/.local/bin/cyime-wayclip
 ```
+
+发布资产统一采用 `cyime-wayclip_版本号_x86_64.打包格式`：
+`tar.gz`、`deb` 和 `rpm` 使用相同的包名、版本号和架构字段。
 
 ### 从源码构建
 

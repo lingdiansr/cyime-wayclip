@@ -20,12 +20,13 @@ jobs:
       set -euo pipefail
       version="${GITHUB_REF_NAME#v}"
       mkdir -p dist
-      root="cyime-wayclip-${version}-x86_64-unknown-linux-gnu"
+      artifact="cyime-wayclip_${version}_x86_64"
+      root="$artifact"
       mkdir -p "$root/usr/bin" "$root/usr/share/cyime-wayclip" "$root/usr/lib/systemd/user"
       install -m755 target/release/cyime-wayclip "$root/usr/bin/"
       install -m644 README.md packaging/cyime-wayclip.service "$root/usr/share/cyime-wayclip/"
       sed 's#@bindir@#/usr/bin#g' packaging/cyime-wayclip.service > "$root/usr/lib/systemd/user/cyime-wayclip.service"
-      tar -C "$root" -czf "dist/$root.tar.gz" .
+      tar -C "$root" -czf "dist/${artifact}.tar.gz" .
       mkdir -p debian/cyime-wayclip/DEBIAN debian/cyime-wayclip/usr/bin debian/cyime-wayclip/usr/lib/systemd/user
       cat > debian/cyime-wayclip/DEBIAN/control <<EOF
       Package: cyime-wayclip
@@ -39,12 +40,14 @@ jobs:
       EOF
       install -m755 target/release/cyime-wayclip debian/cyime-wayclip/usr/bin/
       sed 's#@bindir@#/usr/bin#g' packaging/cyime-wayclip.service > debian/cyime-wayclip/usr/lib/systemd/user/cyime-wayclip.service
-      dpkg-deb --build debian/cyime-wayclip "dist/cyime-wayclip_${version}_amd64.deb"
+      dpkg-deb --build debian/cyime-wayclip "dist/${artifact}.deb"
       mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
       tar -czf "rpmbuild/SOURCES/cyime-wayclip-${version}.tar.gz" --transform "s,^,cyime-wayclip-${version}/," --exclude=target --exclude=.git --exclude=dist --exclude=debian --exclude=rpmbuild .
       sed "s/^Version:.*/Version: $version/" packaging/rpm.spec > rpmbuild/SPECS/cyime-wayclip.spec
       rpmbuild --nodeps --define "_topdir $PWD/rpmbuild" -ba rpmbuild/SPECS/cyime-wayclip.spec
-      find rpmbuild/RPMS -type f -name '*.rpm' -exec cp {} dist/ \;
+      rpm_path="$(find rpmbuild/RPMS -type f -name '*.rpm' -print -quit)"
+      test -n "$rpm_path"
+      install -m644 "$rpm_path" "dist/${artifact}.rpm"
    - uses: softprops/action-gh-release@v2
      with:
       files: dist/*
