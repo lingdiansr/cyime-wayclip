@@ -1,6 +1,7 @@
 #[cfg(not(feature = "wayland"))]
 use cyime_wayclip::clipboard::{ClipboardProvider, UnavailableProvider};
 use cyime_wayclip::config::Config;
+mod terminal_qr;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let verbosity = args
@@ -204,7 +205,7 @@ fn serve(bind: Option<&str>) {
         let code = cyime_wayclip::protocol::generate_pairing_code();
         let uri = format!("http://{}", bind.unwrap_or("127.0.0.1:8765"));
         println!("pairing_code={code}\nv1_uri={uri}");
-        print_qr(&uri);
+        terminal_qr::print(&uri);
         if let Err(e) =
             cyime_wayclip::http_server::serve_v1(bind.unwrap_or("127.0.0.1:8765"), s, &code)
         {
@@ -217,25 +218,12 @@ fn serve(bind: Option<&str>) {
     }
 }
 
-fn print_qr(text: &str) {
-    if let Ok(q) = qrcodegen::QrCode::encode_text(text, qrcodegen::QrCodeEcc::Medium) {
-        for y in 0..q.size() {
-            println!(
-                "{}",
-                (0..q.size())
-                    .map(|x| if q.get_module(x, y) { "██" } else { "  " })
-                    .collect::<String>()
-            );
-        }
-    }
-}
-
 fn pair() {
     let code = cyime_wayclip::protocol::generate_pairing_code();
     println!("pairing_code={code}");
     let uri = "http://127.0.0.1:8765";
     println!("v1_uri={uri} (enter this origin in the Android Lua plugin)");
-    print_qr(uri);
+    terminal_qr::print(uri);
 }
 
 fn serve_v2(bind: Option<&str>) {
@@ -342,7 +330,7 @@ fn serve_v2(bind: Option<&str>) {
             };
             let uri = cyime_wayclip::protocol::encode_pair_uri(&offer).unwrap();
             println!("v2_uri={uri}");
-            print_qr(&uri);
+            terminal_qr::print(&uri);
             let mut p = cyime_wayclip::protocol::PairingService::new(server_id, "CyIME Wayclip");
             p.set_offer(offer);
             if let Err(e) = cyime_wayclip::http_server::serve_v2_tls(

@@ -87,7 +87,14 @@ cyime-wayclip service uninstall
 cyime-wayclip serve-v2
 ```
 
-终端会输出二维码。然后在 Android CyIME 中：
+支持图片协议的交互终端会直接显示黑白二维码图片，自动选择 Kitty graphics、iTerm2 inline images 或 Sixel。
+图片在内存中生成，不写入临时文件；使用整数倍像素缩放，并保留四模块宽的白色静区，避免终端配色影响扫码。
+
+无法确认图片支持时，自动回退为 Unicode 半块字符（`▀`、`▄`、`█`）；未知终端的能力探测最多等待 150 毫秒。
+重定向到文件、管道、日志以及 tmux/Screen 会话时保守使用字符输出，不发送图片控制序列。
+字符模式请使用等宽字体；两种模式都应完整显示二维码及周围留白。
+
+然后在 Android CyIME 中：
 
 1. 安装并启用 CyIME 输入法；
 2. 打开剪贴板同步设置；

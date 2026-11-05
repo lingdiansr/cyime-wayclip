@@ -29,6 +29,9 @@ impl Sandbox {
             .env("XDG_CONFIG_HOME", self.0.join("config"))
             // Deliberately unrelated: approvals must not depend on this directory.
             .env("XDG_RUNTIME_DIR", self.0.join("runtime"))
+            // Inherited image support must not put escape sequences in a pipe.
+            .env("TERM_PROGRAM", "ghostty")
+            .env("TERM", "xterm-ghostty")
             .output()
             .unwrap()
     }
@@ -45,6 +48,126 @@ impl Sandbox {
 impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn pairing_qr_preserves_modules_and_quiet_zone_in_half_blocks() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.run(&["pair"]);
+    let rows: Vec<Vec<char>> = output
+        .lines()
+        .skip(2)
+        .map(|row| row.chars().collect())
+        .collect();
+    let qr = qrcodegen::QrCode::encode_text("http://127.0.0.1:8765", qrcodegen::QrCodeEcc::Medium)
+        .unwrap();
+    let border = 4;
+    let width = (qr.size() + 2 * border) as usize;
+    assert_eq!(rows.len(), width.div_ceil(2));
+    for (y, row) in rows.iter().enumerate() {
+        assert_eq!(row.len(), width);
+        for (x, cell) in row.iter().enumerate() {
+            let (top, bottom) = match cell {
+                ' ' => (false, false),
+                '▀' => (true, false),
+                '▄' => (false, true),
+                '█' => (true, true),
+                _ => panic!("unexpected QR character: {cell:?}"),
+            };
+            for (dy, dark) in [(0, top), (1, bottom)] {
+                assert_eq!(
+                    dark,
+                    qr.get_module(x as i32 - border, (2 * y + dy) as i32 - border),
+                    "QR module at ({x}, {})",
+                    2 * y + dy,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn kitty_terminal_receives_a_lossless_qr_image() {
+    use base64::Engine;
+    use std::{
+        fs::File,
+        io::{Cursor, Read},
+        os::fd::FromRawFd,
+        process::Stdio,
+    };
+
+    let mut master = -1;
+    let mut slave = -1;
+    // The child must see a real terminal, not a pipe with spoofed environment.
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        },
+        0
+    );
+    let mut master = unsafe { File::from_raw_fd(master) };
+    let slave = unsafe { File::from_raw_fd(slave) };
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cyime-wayclip"))
+        .arg("pair")
+        .env("TERM", "xterm-kitty")
+        .env("TERM_PROGRAM", "kitty")
+        .env_remove("TMUX")
+        .env_remove("STY")
+        .stdin(Stdio::null())
+        .stdout(slave)
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut output = Vec::new();
+    let mut buffer = [0; 4096];
+    loop {
+        match master.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => output.extend_from_slice(&buffer[..n]),
+            // Linux reports the closed slave as EIO.
+            Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
+            Err(e) => panic!("read terminal: {e}"),
+        }
+    }
+    assert!(child.wait().unwrap().success());
+    let output = String::from_utf8(output).unwrap();
+    let mut encoded = String::new();
+    for chunk in output.split("\x1b_G").skip(1) {
+        let (header, payload) = chunk.split_once(';').unwrap();
+        assert!(header.contains("m="));
+        encoded.push_str(payload.split_once("\x1b\\").unwrap().0);
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .unwrap();
+    let mut decoder = png::Decoder::new(Cursor::new(bytes)).read_info().unwrap();
+    let mut pixels = vec![0; decoder.output_buffer_size().unwrap()];
+    let info = decoder.next_frame(&mut pixels).unwrap();
+    assert_eq!(info.color_type, png::ColorType::Grayscale);
+    assert_eq!(info.bit_depth, png::BitDepth::Eight);
+    assert_eq!(info.width, info.height);
+    let qr = qrcodegen::QrCode::encode_text("http://127.0.0.1:8765", qrcodegen::QrCodeEcc::Medium)
+        .unwrap();
+    let modules = qr.size() as u32 + 8;
+    assert_eq!(info.width % modules, 0);
+    let scale = info.width / modules;
+    assert!(scale > 0);
+    for y in 0..info.height {
+        for x in 0..info.width {
+            let dark = qr.get_module((x / scale) as i32 - 4, (y / scale) as i32 - 4);
+            assert_eq!(
+                pixels[(y * info.width + x) as usize],
+                if dark { 0 } else { 255 },
+                "QR pixel at ({x}, {y})"
+            );
+        }
     }
 }
 
