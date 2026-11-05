@@ -5,7 +5,7 @@ edition = "2021"
 license = "GPL-3.0-only"
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 hex = "0.4"
 if-addrs = "0.13"
 uuid = { version = "1", features = ["v4"] }
