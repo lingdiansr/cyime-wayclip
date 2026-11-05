@@ -63,7 +63,7 @@ systemd 用户服务可在 unit 的 `[Service]` 中设置 `Environment=CYIME_WAY
 从 [CyIME Wayclip Releases](https://github.com/lingdiansr/cyime-wayclip/releases) 下载 Linux x86_64 tarball：
 
 ```sh
-tar -xzf cyime-wayclip-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf cyime-wayclip-0.2.0-x86_64-unknown-linux-gnu.tar.gz
 install -Dm755 cyime-wayclip-*/usr/bin/cyime-wayclip ~/.local/bin/cyime-wayclip
 ```
 
@@ -184,7 +184,7 @@ GitHub Actions 会在 push 和 pull request 时执行检查；推送 `v*` 标签
 
 ## 版本与许可证
 
-当前版本：`0.1.0`。
+当前版本：`0.2.0`。
 
 本项目与 Android 端 CyIME 一致，采用 GNU General Public License v3.0 或更高版本（GPL-3.0-or-later）。详见 [LICENSE](LICENSE) 和 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
