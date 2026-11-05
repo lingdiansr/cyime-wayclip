@@ -41,7 +41,7 @@ jobs:
       sed 's#@bindir@#/usr/bin#g' packaging/cyime-wayclip.service > debian/cyime-wayclip/usr/lib/systemd/user/cyime-wayclip.service
       dpkg-deb --build debian/cyime-wayclip "dist/cyime-wayclip_${version}_amd64.deb"
       mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-      tar -czf "rpmbuild/SOURCES/cyime-wayclip-${version}.tar.gz" --transform "s,^,cyime-wayclip-${version}/," --exclude=target --exclude=.git .
+      tar -czf "rpmbuild/SOURCES/cyime-wayclip-${version}.tar.gz" --transform "s,^,cyime-wayclip-${version}/," --exclude=target --exclude=.git --exclude=dist --exclude=debian --exclude=rpmbuild .
       sed "s/^Version:.*/Version: $version/" packaging/rpm.spec > rpmbuild/SPECS/cyime-wayclip.spec
       rpmbuild --define "_topdir $PWD/rpmbuild" -ba rpmbuild/SPECS/cyime-wayclip.spec
       find rpmbuild/RPMS -type f -name '*.rpm' -exec cp {} dist/ \;
