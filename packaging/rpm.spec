@@ -17,11 +17,11 @@ cargo build --release --all-features
 
 %install
 install -Dpm0755 target/release/cyime-wayclip %{buildroot}%{_bindir}/cyime-wayclip
-install -Dpm0644 packaging/cyime-wayclip.service %{buildroot}%{_userunitdir}/cyime-wayclip.service
-sed -i 's#@bindir@#%{_bindir}#' %{buildroot}%{_userunitdir}/cyime-wayclip.service
+install -Dpm0644 packaging/cyime-wayclip.service %{buildroot}%{_prefix}/lib/systemd/user/cyime-wayclip.service
+sed -i 's#@bindir@#%{_bindir}#' %{buildroot}%{_prefix}/lib/systemd/user/cyime-wayclip.service
 
 %files
 %license LICENSE
 %doc README.md
 %{_bindir}/cyime-wayclip
-%{_userunitdir}/cyime-wayclip.service
+%{_prefix}/lib/systemd/user/cyime-wayclip.service
