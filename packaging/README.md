@@ -21,7 +21,9 @@ unit.
 
 ## Release artifacts
 
-Tagged releases are built by GitHub Actions and publish a Linux x86_64 tarball.
+Tagged releases are built by GitHub Actions and publish Linux amd64 assets;
+future ARM 64-bit assets use the aarch64 architecture field. Asset names follow
+`cyime-wayclip_<version>_<architecture>.<format>`.
 The repository also includes `packaging/debian/` (debhelper) and
 `packaging/rpm.spec` metadata for native package builders. The user unit is
 installed under `~/.config/systemd/user` and runs only inside a graphical user

@@ -20,7 +20,7 @@
 - `stamp` 防止旧内容覆盖新内容
 - TLS 身份、服务端身份和配置持久化
 - systemd 用户服务模式
-- Linux x86_64 发布包、Debian/RPM 打包元数据
+- Linux amd64 发布包（后续扩展 aarch64）、Debian/RPM 打包元数据
 
 当前版本只支持**文本**剪贴板，不支持图片或其它二进制数据。v2 主动推送、附近配对与显式授权的多设备组网见文末说明；不提供 Linux 扫描设备或图形管理界面。
 
@@ -60,15 +60,16 @@ systemd 用户服务可在 unit 的 `[Service]` 中设置 `Environment=CYIME_WAY
 
 ### 发布包
 
-从 [CyIME Wayclip Releases](https://github.com/lingdiansr/cyime-wayclip/releases) 下载 Linux x86_64 tarball：
+从 [CyIME Wayclip Releases](https://github.com/lingdiansr/cyime-wayclip/releases) 下载 Linux amd64 tarball：
 
 ```sh
-tar -xzf cyime-wayclip_0.2.0_x86_64.tar.gz
-install -Dm755 cyime-wayclip_0.2.0_x86_64/usr/bin/cyime-wayclip ~/.local/bin/cyime-wayclip
+tar -xzf cyime-wayclip_0.2.0_amd64.tar.gz
+install -Dm755 cyime-wayclip_0.2.0_amd64/usr/bin/cyime-wayclip ~/.local/bin/cyime-wayclip
 ```
 
-发布资产统一采用 `cyime-wayclip_版本号_x86_64.打包格式`：
-`tar.gz`、`deb` 和 `rpm` 使用相同的包名、版本号和架构字段。
+发布资产统一采用 `cyime-wayclip_版本号_架构.打包格式`：
+amd64 和 aarch64 使用相同的包名、版本号和架构字段；`tar.gz`、`deb` 和 `rpm`
+三种格式也保持一致。
 
 ### 从源码构建
 
@@ -183,7 +184,7 @@ cargo test --all-features
 cargo clippy --all-features --all-targets -- -D warnings
 ```
 
-GitHub Actions 会在 push 和 pull request 时执行检查；推送 `v*` 标签会自动构建 Linux x86_64 发布包。
+GitHub Actions 会在 push 和 pull request 时执行检查；推送 `v*` 标签会自动构建 Linux amd64 发布包。
 
 ## 版本与许可证
 

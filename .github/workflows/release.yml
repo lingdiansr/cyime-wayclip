@@ -20,7 +20,7 @@ jobs:
       set -euo pipefail
       version="${GITHUB_REF_NAME#v}"
       mkdir -p dist
-      artifact="cyime-wayclip_${version}_x86_64"
+      artifact="cyime-wayclip_${version}_amd64"
       root="$artifact"
       mkdir -p "$root/usr/bin" "$root/usr/share/cyime-wayclip" "$root/usr/lib/systemd/user"
       install -m755 target/release/cyime-wayclip "$root/usr/bin/"
