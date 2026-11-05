@@ -1,259 +1,139 @@
-# CyIME Wayclip 实施方案与插件复用评估
-
-## 1. 目标与决策
-
-用户目标：在 `~/code/Rust` 建立独立 Rust 项目，规划 Linux 剪贴板同步后端；已明确放弃 X11；评估 Android 现有 Win 剪贴板同步插件能否复用。
-
-项目名：**CyIME Wayclip**，目录/二进制名 `cyime-wayclip`。不是 Linux 输入法移植，不涉及 Rime/IBus。
-
-依据：本地 `/home/wks/code/Other/CyIME`，检查时 HEAD `ea6cd05c66793a371cc3cbfde337f8bbc1b88965`。源码能力不等于已发布/已安装 APK 能力。本阶段只写方案，不修改 Android、不打包、不使用 ADB。
-
-决策：
+# CyIME Wayclip 实施路线图
+
+本文是当前实现与后续工作的对照，不再沿用早期“尚未实现 TLS / v2 仅能配对”的说明。
+实现、自动化验证和真实设备验收分别记录；用户已确认当前版本可以连接，不能据此推断全部故障场景通过。
+
+## 1. 产品边界
+
+- Linux Wayland 用户会话中的 CyIME 文本剪贴板同步服务，不是输入法或通用剪贴板管理器。
+- 产品主路径为 Android 原生 v2：HTTPS、叶证书 SHA-256 指纹固定、Bearer Token。
+- 有效 UTF-8 纯文本，单条最多 65536 字节；拒绝 NUL、纯空白、格式错误和超限网络正文，不截断后接受。
+- 不做 X11 回退、PRIMARY、图片/HTML/文件/历史批量同步、云中继、公网穿透、多 seat 自动合并、剪贴板正文持久化。
+- KDE/KWin、Sway、Hyprland 等按真实 registry 与访问策略判断，不按桌面品牌猜测支持。无 data-control 的 GNOME 会话不承诺后台访问。
+- 运行于用户图形会话，不是 root/system service；不承诺未登录时读取桌面。
+- Secret Service、D-Bus/托盘 GUI 属于可选扩展，不是 v2 MVP 的前置条件。
+
+## 2. 当前功能状态
+
+| 阶段 | 当前实现 | 尚需完成 |
+| --- | --- | --- |
+| A：协议与能力验证 | 文本 profile、HTTP 状态、QR、status、stamp 与 Android 报文兼容；用户已确认可连接 | 完整目标 APK / Windows 互操作矩阵与跨桌面验收 |
+| B：Wayland provider | 已切换为常驻原生 ext/wlr 后端，完成有界 FD 传输、进程内 source 生命周期、generation/session、seat 选择及断连恢复；同步层保留去重、暂停和时钟语义 | KWin/Sway/Hyprland 的真实环境矩阵；不将 niri 与隔离协议测试泛化为所有桌面通过 |
+| C：旧 Lua v1 PoC（可跳过） | 有显式 serve-v1 与内存 profile HTTP 路径 | 尚未接入真实桌面；认证/ETag/allow-insecure-v1 契约未闭环，不宣称完整旧插件互通 |
+| D：v2 安全同步 | HTTPS/pinning、扫码、身份持久化、令牌轮换/撤销、文本同步与时钟持久化已接通 | 扫码配对失败限速、secret 恒定时间比较、后台配对输出隔离、多网卡二维码端点保留 |
+| E：推送/发现/组网/交付 | peer 回调、最新内容队列、退避重试、nearby 本地批准、grant/introduce、mDNS 广播、用户服务和打包元数据已有实现 | Linux 平台发现身份、正式包构建/升级验收、图形会话生命周期、多设备真实验收 |
+
+“已有实现”不等同于全部真机验收通过。附近配对有自己的限速；不能据此称扫码 /api/pair 也有限速。
+
+### 已实现的同步约束
+
+- v2 GET 200/204/304、ETag、方向暂停 403、桌面不可用 503；网络超限 413、错误格式 400。
+- 写桌面失败不伪报成功，不推进 profile/ETag；同 hash 不重写，旧 stamp 不覆盖新内容。
+- Android 数字 stamp 为毫秒时间戳；兼容旧对象 stamp。超过本机时间五分钟的数字时间戳拒绝。
+- clock.json 仅保存 hash、stamp、旧计数器，不保存正文；未知启动前旧 selection 不当成新复制外发。
+- TLS 身份、server_id、设备授权和回调持久化；私密状态目录 0700、文件 0600。
+- 出站 HTTPS 固定证书指纹并验证握手签名；回调地址由真实请求源 IP 与端口构成，限制局域网字面量地址，不跟随重定向。
+- 推送只保留每设备最新待推内容；临时失败按 30/120/600 秒退避，400/401/403/413/415 不自动重试。
+- 暂停会取消在途请求和待推内容；恢复不重放已取消的内容。反向注册与剪贴板推送分开排队。
+- mDNS 当前仅广播，不主动扫描设备；为兼容 Android 仍使用 kind=windows，不能称为已完成 kind=linux 适配。
+- 图片协议终端可显示内存生成的二维码图片；普通终端与重定向回退半块字符。此功能不代表图片剪贴板同步。
+
+## 3. 本轮：原生 Wayland 后端
+
+### 3.1 目标与非目标
+
+结果：已移除 wl-copy 子进程及 wl-clipboard-rs 读路径，所有 selection 读写由本进程中的原生 Wayland worker 完成。
+保留 v2 线协议、凭据、clock.json 与现有去重/方向语义；不借本轮修改配对协议、打包或旧 v1 功能。
+
+### 3.2 架构与接口
+
+- 一个 worker 独占 Connection、EventQueue、manager、seat、device、offer 和 source；其它线程不得 dispatch 这些对象。
+- 完整 registry 初始化后优先 ext_data_control_manager_v1；没有 ext 时使用 zwlr_data_control_manager_v1。
+- 只处理 Regular selection。只存在一个 seat 时自动选择；多个 seat 或指定名称不存在时明确不可用，不任意选择。
+- 使用 CYIME_WAYCLIP_SEAT 指定 seat 名称；切换 seat 需要重启，不在运行中合并不同 seat 的内容。
+- Snapshot 包含 generation 和共享的原始文本。读取从内存快照返回，不再每次 HTTP 请求创建连接或阻塞读取 compositor。
+- 写请求通过有界队列进入 worker，携带预期 generation 与 deadline。worker 检查 selection 没有被新事件替换后再 set_selection。
+- 写入在 compositor 的同步回调确认后完成，不等待其它应用粘贴。source 在 worker 中存活并可响应多次 send；取消/替换时及时释放。
+- 同步监控由 selection 变化唤醒；500ms 仅保留配置/授权维护时限，不再每 500ms 发起一次系统剪贴板传输。
+- 所有调用方切换到同一个 backend 实例；删除旧 provider 占位、独立读写函数与依赖，不保留兼容垫片。
+
+### 3.3 有界 I/O 与一致性
+
+- worker 使用 poll 同时处理 Wayland socket、命令唤醒和非阻塞传输 FD，不阻塞在某个剪贴板 owner 的管道上。
+- 文本传输最多读取 65537 字节以判断超限；offer 读取、source 发送、初始化握手和写请求均有 deadline。
+- 同时在途 FD 数与写队列容量有上限，繁忙时返回错误，不能无限创建线程或积累内容。
+- 每次 selection 替换使 generation 递增；旧 offer 的迟到数据不得覆盖新 selection。
+- 无文本 MIME / null selection 为无内容；超时、非法 UTF-8、断连等为不可用，不使用旧正文冒充当前系统内容。
+- 写入遇到 generation 不匹配或连接失效时失败，HTTP 不推进时钟/ETag。Wayland 无跨进程原子 CAS，仍明确承认最后检查之后可能发生外部竞争。
+- source 提供 text/plain;charset=utf-8、text/plain、UTF8_STRING 等已验证的文本 MIME；保持 UTF-8、emoji、CRLF 原样，不做 trim 或 normalization。
+
+### 3.4 生命周期
+
+Starting → Ready / Unsupported / Disconnected → Reconnecting → Ready。
+
+- 初始化失败、socket 断开、设备 finished、选中 seat/manager 消失时清除快照和所有旧 offer/source/FD；请求返回不可用，不回填旧正文。
+- 按 1/2/5/10/30 秒上限退避重连，并加入小幅抖动；等待期间仍能停止 worker 和拒绝过期命令。
+- 重连后重新枚举协议与 seat，只读取当前 compositor 的 selection，不重放断连前的写入。
+- 最后一个 backend handle 释放时唤醒并停止 worker，关闭连接与传输；不残留 wl-copy 或后台子进程。
+- run 不再因为启动时 compositor 暂不可用而正常退出；后台服务可等待恢复。doctor 报告真实 worker 状态、协议、seat 与诊断原因。
+
+### 3.5 文件分工和实施顺序
+
+1. 更新本文与 README，记录状态、边界和验收标准。
+2. src/clipboard/mod.rs：保留状态类型，定义带 generation 的快照，删除未接通的旧 trait/占位实现。
+3. src/clipboard/wayland.rs 及其内部协议模块：连接 owner、ext/wlr 调度、FD 传输、source、seat、重连与有界命令。
+4. src/sync_runtime.rs：快照 generation、条件写入、事件唤醒；迁移相应测试，不改变 v2 时钟和暂停契约。
+5. src/http_server.rs、src/main.rs：共享 backend、服务启动与 doctor；移除旧独立读写路径。
+6. Cargo.toml/Cargo.lock：移除 wl-clipboard-rs，启用直接 wlr bindings；测试需要的 server bindings 只作为开发依赖。
+7. 补充真正传递 Wayland 请求、事件和 FD 的隔离协议测试，再做真实 compositor 冒烟，最后回填已完成状态。
+
+### 3.6 验收
+
+- [x] ext 优先、wlr 独立回退，无协议与多个 seat 明确报不可用；显式 seat 选择有效。
+- [x] 真实请求/事件/FD 测试覆盖远端 offer 读取、原生 source 写入和重复粘贴，UTF-8/emoji/CRLF 精确一致。
+- [x] 65536/65537 字节、非法 UTF-8、无文本 MIME、null selection 的结果正确。
+- [x] 慢 owner / 停止读取的消费者不会卡死 worker；超时后新 selection 和新写入仍能工作。
+- [x] offer 替换、source cancelled、generation 冲突、seat 消失和 socket 断开不会返回旧内容或接受过期写入。
+- [x] 重连后读取新 selection，不重放旧写入；worker 退出释放 FD 与连接。
+- [x] 同步层在条件写失败时不推进 clock/ETag；保留既有 HTTP、暂停和撤销测试。
+- [x] 使用 PATH=/nonexistent 也可运行真实读写；原生后端没有旧工具依赖或占位入口。
+- [x] niri 独立嵌套会话读写冒烟通过，当前桌面只读探测为 ext-data-control-v1 / seat0 / Ready；跨桌面验收另列，未修改用户桌面剪贴板。
+- [x] cargo fmt --all -- --check、cargo test --all-features（147 项）、cargo test --no-default-features（131 项）、cargo clippy --all-features --all-targets -- -D warnings 通过。
 
-1. 建独立 Rust 用户态 daemon，分离 Wayland provider、同步状态机和兼容 HTTP/TLS 服务端。
-2. **现有 Lua Win v1 插件可不改协议代码连接 Linux**；名称写 Windows 不限制 HTTP 对端平台。
-3. **v2 加密扫码是 Kotlin 原生路径，不是旧 Lua 插件能力**。产品应复用该原生客户端；不新造 Noise/QUIC/WebSocket 协议。
-4. 原插件 v1 仅为可选互通 PoC，显式启用、默认关闭；安全产品目标是已有 v2 HTTPS + 叶证书指纹固定 + Bearer。
-5. 不把 Windows 类全面重命名为 Desktop 作为前置工作。先验证线协议，必要的 Linux 发现/UI 补丁独立处理。
-6. Wayland 同时评估 `ext-data-control-v1` 与 `wlr-data-control-unstable-v1`，按真实 compositor 能力绑定；不只凭桌面名称判断支持。
-
-## 2. 明确边界
-
-首版仅同步有效 UTF-8 纯文本，单条≤65536 字节。不做 PRIMARY、图片/HTML/文件/历史批量同步、云中继、公网穿透、GNOME Shell 扩展、多 seat 自动合并、剪贴板正文持久化。
-
-- 没有 X11/XWayland 专用后端，也不以临时焦点窗口 hack 回退。
-- 不能声称“禁止 XWayland 应用同步”：若 compositor 将应用剪贴板桥接到 Wayland selection，它仍可能互通。
-- KDE/KWin、Sway、Hyprland 是候选验收环境，实际支持取决于版本、registry global 和访问策略，不承诺某品牌全版本可用。
-- 默认 GNOME 不承诺后台监听；无可用协议就明确不支持。
-- 没有可假定全桌面通用的任意后台剪贴板 portal；GTK/Qt、wl-clipboard 都不能绕过 compositor 权限。
-- 运行于用户图形会话，不是 root/system service，不承诺未登录也能取桌面剪贴板。
-
-## 3. Android 复用证据
+## 4. 原生后端之外的待办
 
-以下均为已检查源码的完整路径：
+### 安全和运行时
 
-| 路径 | 已核实能力及意义 |
-|---|---|
-| `/home/wks/code/Other/CyIME/plugins/cyime-windows-sync/main.lua` | HTTP/HTTPS origin、Basic、GET/PUT `/api/clipboard`、Profile SHA-256/size、ETag；无 Windows 平台校验 |
-| `/home/wks/code/Other/CyIME/plugins/cyime-windows-sync/manifest.yaml` | ID `com.cyime.plugin.windows_clipboard`，协议 `cyime-windows-v1`，前台轮询 2000 ms，max_text_bytes=65536，允许自定义 host |
-| `/home/wks/code/Other/CyIME/plugin-core/src/main/java/com/kingzcheung/xime/plugin/core/api/ClipboardSyncPlugin.kt` | ClipboardProfile、push/pull/acknowledgePull/testConnection；复用客户端和契约，不是 Rust 直接链接 Kotlin |
-| `/home/wks/code/Other/CyIME/plugin-core/src/main/java/com/kingzcheung/xime/plugin/core/sync/ClipboardSyncSession.kt` | 串行同步、重试、写回检查、回声抑制；不重复塞进 Lua |
-| `/home/wks/code/Other/CyIME/app/src/main/java/com/kingzcheung/xime/clipboard/sync/ClipboardSyncBridge.kt` | 系统事件、敏感过滤、可见性/轮询调度；原生 mesh 有额外路径 |
-| `/home/wks/code/Other/CyIME/app/src/main/java/com/kingzcheung/xime/clipboard/sync/WindowsSecureTransport.kt` | v2 HTTPS、固定叶证书 SHA-256、Bearer、status/clipboard/peer、多设备请求 |
-| `/home/wks/code/Other/CyIME/app/src/main/java/com/kingzcheung/xime/clipboard/sync/WindowsPairingProtocol.kt` | QR/origin/token/profile/stamp/注册校验，是互通的关键解析器 |
-| `/home/wks/code/Other/CyIME/app/src/main/java/com/kingzcheung/xime/clipboard/sync/WindowsDevices.kt` | QR 配对、反向注册、mDNS；发现仅接受 windows/android kind；QR 不需要依赖发现 |
-| `/home/wks/code/Other/CyIME/app/src/main/java/com/kingzcheung/xime/clipboard/sync/WindowsNearbyPairing.kt` | nearby proof、120 秒确认窗口；201 仅 ready，用户确认后才 commit |
-| `/home/wks/code/Other/CyIME/app/src/main/java/com/kingzcheung/xime/clipboard/sync/DeviceHost.kt` | Android 自身提供 pair/status/clipboard/peer/grant/introduce，是现成 v2 服务端参考 |
-| `/home/wks/code/Other/CyIME/app/src/main/java/com/kingzcheung/xime/clipboard/sync/ClipboardClock.kt` | hash/stamp 去重；收到的内容不再次转发；旧 stamp 不覆盖 |
-
-### 3.1 旧 Lua v1：可直接复用
-
-服务端满足以下条件，Android 用户即可选择现有 Windows 同步插件，填写 Linux IP origin/配对码，无需新建 Linux 插件：
-
-- `Authorization: Basic base64("cyime:" + pairingCode)`；码长 16～128，不含空白/控制字符，建议 32 随机字节 base64url 无填充，不能用六位数字替代。
-- serverUrl 仅 origin，不含路径/query/userinfo，不填写 `/api/clipboard`。
-- GET/PUT 均只访问 `/api/clipboard`；连接测试也使用 GET，不需要 v1 status/pair API。
-- 单次 timeout=3000 ms；PUT 不能等用户未来粘贴才回复。
-- ETag 只在宿主实际接受内容后由 acknowledgePull 推进；GET 成功不是手机写入成功。
-- 默认只同步文本≤64 KiB；HTTP body 还受 262144 字节限制。
-- 空/图片 GET=204，不要求手机清空；304 表示无变化。
-- 手机键盘显示时约 2 秒拉取，隐藏停止持续拉取；Linux 常驻不能解除 Android 生命周期限制。
-- v1 不提供跨设备时间顺序，不强制客户端未发送的 If-Match，不宣称可自动判断哪台历史内容更新。
-
-限制：HTTP Basic 明文不保密。Lua 接受 HTTPS URL 不代表支持自签名指纹扫码：其 host.http 的信任行为需另核实，不能关闭证书校验绕过问题。复用不等于安全产品已完成。
-
-### 3.2 原生 Kotlin v2：推荐产品路线
-
-Linux 实现已有协议，Android 走现有扫码入口。QR 路径有无需 Android 协议修改的条件，但必须拿真实 APK 联调，不能先宣布兼容通过。
-
-关键兼容条件：
-
-- origin 为 HTTPS + 数字 IP + 显式端口，限 loopback/private/link-local/IPv6 ULA；不放 DNS/public origin，例如主机名.local 不符合当前解析器。
-- pin 是叶证书 DER SHA-256 小写 hex，不是 SPKI；还检查证书有效期。
-- token/offer secret 为32随机字节 base64url 无填充，匹配 `[A-Za-z0-9_-]{43}`。
-- 优先 JSON QR：`cyime://pair?v=2&data=<base64url(JSON)>`；字段 v=2、server_id、name、certificate_sha256、pairing_id、secret、endpoints、expires_at。
-- UUID/端点校验按原解析器；端点1～8个；JSON≤4096字节、QR字符串≤8192字符；compact c= 编码可后做。
-- `/api/pair` POST 返回201，包含 v=2、server_id、server_name、device_id、access_token。offer 短期单次消费，重新配对轮换 token；失效/错误/限流明确响应。
-- `/api/status` 的 push、push_pin、push_port、push_failed 影响轮询与注册；没有实测主动推送时 push=false，不虚报能力。
-- `/api/peer` 注册手机动态 TLS 端口、pin、token。回调以连接远端 IP + 注册端口为基础，不接受任意 origin 引发 SSRF。
-- `/api/grant`、`/api/introduce` 关系到多设备引介；未实现不能宣称完整 mesh 等价。
-- `/api/pair/nearby` 是附近连接码确认，不是扫码 pair 的别名；未实现附近功能不阻塞扫码 MVP，但不能声称支持该功能。
-- mDNS `_cyime-clip._tcp.` 当前会过滤 kind=linux。首版只扫码，不伪装 Windows；后续给 Android 独立增加 linux kind 和文案。
-
-| 目标 | Android 改动 | 判断 |
-|---|---|---|
-| 原 Lua v1 手动文本互通 | 原则无 | 可做最早互通验证 |
-| 原生 v2 QR + 前台同步 | 原则无协议修改，待实测 | 推荐安全 MVP |
-| Lua 原文件实现 v2 pin/QR/mesh | 需要新桥接或重做 | 不推荐，已有 Kotlin 路径 |
-| mDNS 自动列出 Linux | 需最小 kind/UI 补丁 | 后续功能 |
-| 主动推送/多设备 mesh | 尽量复用原生端 | Linux 实现更多接口，逐项验证 |
-| 全面 Windows→Desktop 重命名 | 可选重构 | 不应是本项目互通前提 |
+- 入站 HTTP header/body、连接数/并发数的硬上限与超时；不能把出站 deadline 当成入站保护。
+- 扫码 /api/pair 失败限速和 secret 恒定时间比较；二维码输出与 systemd/journal 日志隔离。
+- 多网卡 QR 保留所有可达 endpoint，而非默认 compact 只保留第一个 IPv4 地址。
+- 暂停恢复、授权文件读取失败与回调恢复的故障语义继续核验。
+- status 当前只是 doctor 的别名，不是守护进程运行状态/队列面板。
 
-## 4. Rust/Wayland 技术设计
+### 发现与部署
 
-### 能力与数据通道
+- Android 端接受 kind=linux 并显示正确平台文案，之后移除 Linux 端的 windows 兼容广播；Android 改动独立提交。
+- 修正 DEB payload/control 组装，RPM 构建失败必须失败而非忽略；统一许可证元数据。
+- 完成用户服务图形会话环境、注销停止、安装失败返回值及升级保留身份的验收。
+- 旧 Lua v1：选择真正接通桌面并完善契约，或正式从产品范围移除；本轮不扩大到该分支。
 
-1. 连接 Wayland，枚举 registry、manager、seat、协议版本；环境变量仅用于诊断。
-2. 优先可用 ext-data-control，次选 wlr-data-control；阶段 A 验证 Rust bindings/目标 compositor 后定案。同 seat 只启用一个 provider。
-3. 首版单 seat；不明确时要求选择，不混合多个剪贴板。
-4. offer MIME 优先 text/plain;charset=utf-8，其次经验证的文本变体。无文本不是清空远端的命令。
-5. pipe/FD 有界异步读取；边读边限制65536字节，并设超时、并发及 FD 数上限。
-6. 严格 UTF-8，拒绝 NUL/空白/超限；不 trim、不改换行、不做 Unicode normalization，避免哈希变化。
-7. 写入创建 data source、set_selection、持续响应 send FD，保持 source 存活；不等待用户 paste 才回复网络 ACK。
-8. 每个 selection 事件带 generation；写回前检查更新；用 origin+hash 抑制自身回声，不粗暴“忽略下一条事件”。
-9. 处理 cancelled、null selection、失效 offer、seat 消失、断连重连。缓存不能在失效后继续冒充当前系统内容。
+## 5. 验证证据与后续矩阵
 
-Wayland 没有跨进程剪贴板原子 CAS，最后检查和 set_selection 仍有竞态，不能宣称完全消除。协议也无法统一提供 Linux 敏感标记；密码过滤只能尽力而为并明确限制。
+### 已有依据
 
-状态：Starting→Ready/Unsupported→Disconnected→Reconnecting→Ready。退避建议1/2/5/10/30秒加抖动。不可用时 authenticated clipboard 请求返回503，不发旧正文；恢复后读取真实 selection，不回填断连前旧文本。
+- 用户已确认二维码显示与当前版本连接可用；此前 Android 实机验证过上传格式兼容修复。
+- 现有 Rust 测试涉及 profile/HTTP、设备持久化与撤销、nearby、推送、loopback TLS 和 mesh。
+- 网络集成测试和静态代码不代表 Windows/Android 全量互操作已通过。
+- 原生后端包含 16 项隔离 Wayland 协议测试及 4 项同步层 generation/session 回归测试。隔离 compositor 使用真实 Unix socket、Wayland 请求/事件和 SCM_RIGHTS 文件描述符，而不是模拟返回文本的空实现。
+- 真实冒烟环境：niri 26.04（v26.04-610-g8ebd6466）独立嵌套会话，三个以上原生客户端交替持有 selection、反复读取同一 source、UTF-8/emoji/CRLF 与 65536 字节背压传输均通过。
+- 同一隔离会话运行生产 serve_v2_tls 入口并使用临时身份/授权目录：校验证书 pin 后扫码配对 201、文本 PUT 200、独立原生客户端读取完全一致，随后 GET 200 的正文、SHA-256 和 ETag 均一致。
+- 冒烟时 PATH=/nonexistent，未调用外部剪贴板工具；测试拒绝连接用户父会话，退出后关闭嵌套 compositor，未改写用户当前桌面剪贴板。
 
-### 模块布局（规划，尚未创建源码）
+### 仍需真实验收
 
-```text
-src/main.rs                    CLI/runtime
-src/config.rs                  XDG路径、开关、权限
-src/clipboard/{mod,wayland,ext,wlr}.rs
-src/protocol/{profile,v1,v2,pairing,peers}.rs
-src/sync.rs                    来源、generation、stamp、方向
-src/server.rs                  鉴权/TLS/HTTP限流
-src/state.rs                   身份/授权元数据，不存正文历史
-tests/                         协议/竞态/golden/真实桌面
-packaging/                     systemd用户服务
-```
+- 目标 APK：双向文本、收起/显示键盘、后台/恢复、断网重连、热点切换和时钟差。
+- Linux/Android/第三设备：不回环、推送与轮询切换、撤销及时生效、暂停恢复。
+- Wayland：KWin/Sway/Hyprland 的具体版本与 registry、重复粘贴、source 保持、seat 变化、compositor 重启。
+- 发布：DEB/RPM/tarball 安装、卸载、升级，TLS 身份、server_id 与已配对授权保持不变。
 
-候选依赖：tokio、axum、rustls、rcgen、serde/serde_json、sha2、base64、uuid、wayland-client、wayland-protocols、wayland-protocols-wlr、必要时 wayland-scanner；后续 reqwest、二维码输出、tracing。实现前核实版本/API/MSRV、ext/wlr bindings、XML来源/许可证，锁 Cargo.lock；当前未声称已验证某版本。
-
-Wayland 专用 event loop 作为单一 owner，Tokio 网络通过有界 command/event channel 交互；不让网络任务持有 Wayland 对象，不在 mutex 内等待网络/FD，不无限积压请求。
-
-不以 GTK/Qt/arboard 作为已解决后台访问的假设。wl-clipboard 可做人工诊断/验收工具，不是正式核心依赖或权限兜底。
-
-## 5. 线协议和状态一致性
-
-Profile：type=text，text=原始文本，hash=小写SHA256(UTF8)，size=UTF8字节数，has_data=false，data_name=null，source=CyIME-Wayclip；v2另携带stamp。v1 source长度≤128按原 Lua 校验兼容。
-
-| 请求/条件 | 响应原则 |
-|---|---|
-| GET 有效文本 | 200 Profile + `ETag: "<hash>"` |
-| If-None-Match 命中 | 304，无正文 |
-| 无有效文本 | 204，不清空手机 |
-| v1 PUT 已接受写入 | 200，返回相同hash的Profile，不能提前确认排队成功 |
-| 鉴权失败/方向禁用 | 401/403 |
-| 超限/格式或类型错误 | 413、400/415，按冻结契约 |
-| 不可用/暂时忙 | 503 |
-| 并发冲突 | 按v1/v2真实语义，不统一滥发409 |
-
-JSON body上限262144字节；即使文本≤65536，转义后body仍可能超限，拒绝而非截断。hash/size 使用真正UTF-8，不能用CESU-8。
-
-方向以Linux为参照：send禁用则GET不得给正文；receive禁用则拒绝PUT。v2暂停结构包含v=2、sync_paused、send_enabled、receive_enabled，与客户端解析一致。
-
-- v1使用本地generation检测竞争，无法建立全设备总序。
-- v2按现有ClipboardClock，保留收到的stamp、同hash不重写、旧stamp不覆盖，remote内容不再fan-out；不自行更换为新设备ID/Lamport线协议。
-- 当前stamp不是严格分布式总序：同stamp不按设备ID破平局，墙钟可能偏差；必须保留兼容并记录边界。
-- Android DeviceHost对stale消息可200回包并不实际写系统；分清accepted/applied/ignored-stale，不能将所有200都描述为“系统现值就是来包”。
-- v2无stamp旧端按现有回退行为处理，先用fixtures冻结。
-- provider失败不得先推进profile/ETag；用户后来再次复制和之前网络ACK是不同事件。
-
-## 6. 安全、配置与部署
-
-- 默认v2；v1须显式allow-insecure-v1并警示可信LAN风险，不自动降级。
-- 初始不无提示监听全部接口；loopback/未开放为默认，用户选择LAN地址再开配对。
-- TLS身份稳定保存，升级不换pin；重置/过期更换证书须重新配对。
-- 配对窗口建议120秒、一次使用、失败限速/次数；token hash常量时间比较；撤销立即生效。
-- 拒绝无鉴权读写；body/连接/并发/超时全有限；不开放CORS，不使用cookie，不把Basic当网页登录。
-- QR含secret；凭据/正文/QR不进入journal或普通日志。显式本地pair输出与日志分离。
-- 不持久化正文。缓存过期清理不同于主动清空系统剪贴板，后者默认不做，避免清掉用户新内容。
-- 提供暂停/只发/只收/设备撤销；不能保证识别所有密码内容。
-- 配置建议`$XDG_CONFIG_HOME/cyime-wayclip/config.toml`，身份/授权`$XDG_STATE_HOME/cyime-wayclip/`，临时IPC`$XDG_RUNTIME_DIR/cyime-wayclip/`；目录0700、私密文件0600、原子替换。
-- Secret Service可选；无钥匙环时明确选择受权限保护文件或不保存，不能宣称所有Linux必有libsecret。
-- `systemd --user`绑定图形会话，正确导入WAYLAND_DISPLAY/XDG_RUNTIME_DIR；不借linger宣称未登录同步。会话退出关闭服务。
-- 沙箱候选NoNewPrivileges、受控state/runtime写入、AF_UNIX/AF_INET/AF_INET6限制；实测不破坏Wayland socket/TLS/Secret Service，不照抄即算通过。
-- 首版CLI规划doctor/run/pair/status/devices list/revoke；完整DBus/托盘UI不作为MVP前提。
-
-## 7. 阶段与验收
-
-工期是熟悉Rust/Wayland单人、测试桌面和手机可用情况下的人日估算，不是承诺。
-
-### A：协议冻结和能力验证，2～3人日
-
-核实目标桌面版本/registry、bindings；冻结Profile/HTTP/QR/status fixtures；核对v2原客户端push=false轮询路径。查阅完整Windows服务端/规范（当前未提供，不当作已读）。
-
-门槛：真实Wayland读写/粘贴成功，unsupported可检测；契约有真实解析器依据。
-
-### B：Wayland provider + 状态机，3～5人日
-
-初始化Cargo并锁依赖；实现一个可用adapter、FD限流、source生命周期、generation/来源、断连恢复。另一个adapter按目标桌面分开排期。
-
-门槛：中文/emoji/CRLF精确保留；65536/65537边界；重复粘贴仍有数据；断连不发旧内容；没有X11回退。
-
-### C：旧Lua插件互通PoC，2～3人日，可跳过
-
-显式v1服务，原Lua+宿主harness互通，再真实手机填写LinuxIP。不要改插件掩盖服务端错误。
-
-门槛：原插件双向文本、ETag/ACK/重试/方向和空内容行为正确，无回声风暴；明确隐藏键盘不持续拉取。HTTP不能当安全发布。
-
-### D：v2安全扫码MVP，4～7人日
-
-稳定身份、QR offer、pair/token撤销轮换、status/v2clipboard/stamp。先保守push=false，验证原生QR+轮询；若真实调度需要额外接口，按证据补齐，不关掉客户端安全校验绕过。
-
-门槛：实际目标APK扫码成功；pin错误/过期offer/token撤销失败；不启用v1也能同步；手机生命周期边界准确。
-
-### E：主动推送/发现/打包，4～7人日，独立范围
-
-peer注册及固定pin回调，失败退避、push状态真实；grant/introduce mesh与nearby按需逐项实现；Android linux kind/UI最小补丁单独提交；user service/升级保留身份；第二桌面回归。
-
-门槛：三设备不回环，断网重试有界，撤销立即生效，推送与轮询切换正确，打包升级实际验证。
-
-A+B+C约7～11人日；A+B+D约9～15人日；加跨桌面和E约3～5周量级。bindings/协议差异/桌面权限/设备可用性均会扩大估算。
-
-## 8. 测试资产与验收矩阵
-
-1. 单元：精确UTF-8 hash/size，补充平面emoji、CRLF、不规范化Unicode、空白/NUL/非法UTF-8、文本/body双上限、同/旧stamp。
-2. HTTP契约：200/204/304、hash确认、鉴权、方向、畸形/截断JSON、慢请求、超限、503/409真实条件。
-3. 竞态：GET等待中新复制、写入失败不推进ETag、自己selection回声、外部抢占、重复请求、断连重连。
-4. 安全：QR/私网origin、pin改变/证书过期、offer超时/重放、token轮换撤销、回调SSRF、日志脱敏。
-5. 真实Wayland：registry能力、offer取消、FD泄漏/阻塞、连续粘贴、source保持、seat选择、compositor重启。
-6. 真机：显示/收起键盘、重连、双向同时复制、2～3设备不回环；真机/用户验收单独记，不能由单测替代。
-
-可复用Android测试思路/断言：
-
-- `/home/wks/code/Other/CyIME/plugin-core/src/test/java/com/kingzcheung/xime/plugin/core/lua/LuaWindowsClipboardSyncTest.kt`
-- `/home/wks/code/Other/CyIME/plugin-core/src/test/java/com/kingzcheung/xime/plugin/core/lua/WindowsClipboardInteropTest.kt`
-- `/home/wks/code/Other/CyIME/plugin-core/src/test/java/com/kingzcheung/xime/plugin/core/sync/ClipboardSyncSessionTest.kt`
-
-`/home/wks/code/Other/CyIME/tools/clipboard-sync-fixture/README.md`的fixture编译外部Windows C#服务端，不是已经可直接切换Rust的全套测试。需要另加可配置origin/Rust测试宿主；DLL缺失导致skipped不能算通过。
-
-本方案阶段上述测试均未执行，仅完成源码检查和文档校验。
-
-## 9. 开工前未决项
-
-- 首个验收桌面/版本、ext/wlr实际能力和Rust crate版本/MSRV。
-- 目标安装APK是否含本快照v2原生扫码；旧插件README只谈v1，不足以否定新原生代码，也不能用新代码推断已安装能力。
-- 完整Windows规范/服务端与Android DeviceHost差异，尤其status/push/stale语义。
-- QR+push=false的真实轮询调度，是否可直接跳过v1阶段。
-- 依赖与引用源码/XML许可证。复用协议/测试不等于无条件复制Android/Windows源码。
-- 目标目录当前只读：创建`/home/wks/code/Rust/cyime-wayclip`失败（只读文件系统）；当前文档暂存工作区，未修改挂载或权限。
-
-最终建议：**先锁定Wayland provider与既有wire contract，再用原客户端互通；产品默认v2，v1只是可跳过验证路径。重点复用现有Android协议客户端，而不是再写一个Linux同步插件。**
-
-## 当前实现运行说明
-
-`cyime-wayclip serve` 当前启动 v1 HTTP listener；默认仅绑定 `127.0.0.1:8765`，尚未实现 TLS。Android Lua v1 插件配置时使用 server origin（例如 `http://192.168.1.10:8765`），插件会访问 `/api/clipboard`，认证需按协议使用 Basic `cyime:<pairing-code>`。公网或不可信 LAN 不应启用；v2 HTTPS/pinning 仍待实现。
-
-Serve LAN example: `cyime-wayclip serve 192.168.1.10:8765`. Only bind a trusted private interface. Pairing codes must be transported out-of-band; v1 Basic authentication is plaintext on HTTP and is not suitable for hostile networks.
-
-### v2 HTTPS pairing (experimental)
-
-Build with `cargo run --features wayland -- serve-v2 192.168.1.10:9876`. The command prints a `cyime://pair?v=2&data=...` URI. Android must validate the HTTPS endpoint and pin the printed certificate DER SHA-256 fingerprint; do not disable certificate verification. The current listener implements pairing only; clipboard v2 sync remains incomplete.
-
-`serve-v2` requires an explicit reachable LAN address, e.g. `cargo run --features wayland -- serve-v2 192.168.1.10:9876`; it rejects 0.0.0.0, 127.0.0.1, and localhost because Android would resolve those to itself. Bind the listener to the LAN interface and scan the printed QR on the same network.
-
-### Multi-interface v2 listening
-
-`serve-v2` defaults to `0.0.0.0:9876`, so one TCP listener accepts connections on every IPv4 interface (including the Android hotspot interface); QR endpoints are discovered separately and may list up to eight reachable addresses. Passing an explicit host binds only that interface. IPv6 addresses are discovered when available, but the current endpoint formatter is intended primarily for IPv4 hotspot LANs; use an explicit IPv4 host for Android hotspot compatibility.
-
-CLI verbosity: pass `-v`, `-vv`, or `-vvv` to set `CYIME_VERBOSITY` (1–3) for service diagnostics. Existing `RUST_LOG` remains supported by dependencies.
-
-Logging: `-v/-vv/-vvv` controls diagnostics emitted to stderr/stdout. Set `CYIME_LOG_FILE=/path/to/cyime-wayclip.log` for an additional append-only file sink; absent this variable no file is created. Prefer a user-owned XDG state path (`$XDG_STATE_HOME/cyime-wayclip/cyime-wayclip.log` or `$HOME/.local/state/cyime-wayclip/cyime-wayclip.log`) and restrict permissions to the user.
-
-
-CI/local validation: run `cargo fmt --all -- --check`, `cargo test --all-features`, and `cargo clippy --all-features --all-targets -- -D warnings` before pushing. PUT logs Wayland MIME/seat errors at `-v`; use `-vvv` for request tracing.
+验证记录必须注明实际环境与执行范围；未执行的验收不勾选，不用单测数量替代真实设备证据。
