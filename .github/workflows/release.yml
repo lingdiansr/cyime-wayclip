@@ -43,7 +43,7 @@ jobs:
       mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
       tar -czf "rpmbuild/SOURCES/cyime-wayclip-${version}.tar.gz" --transform "s,^,cyime-wayclip-${version}/," --exclude=target --exclude=.git --exclude=dist --exclude=debian --exclude=rpmbuild .
       sed "s/^Version:.*/Version: $version/" packaging/rpm.spec > rpmbuild/SPECS/cyime-wayclip.spec
-      rpmbuild --define "_topdir $PWD/rpmbuild" -ba rpmbuild/SPECS/cyime-wayclip.spec
+      rpmbuild --nodeps --define "_topdir $PWD/rpmbuild" -ba rpmbuild/SPECS/cyime-wayclip.spec
       find rpmbuild/RPMS -type f -name '*.rpm' -exec cp {} dist/ \;
    - uses: softprops/action-gh-release@v2
      with:
