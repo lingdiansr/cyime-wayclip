@@ -1,5 +1,6 @@
 //! Serialized desktop state shared by polling HTTP clients and the push watcher.
 use crate::{
+    clipboard::ClipboardSnapshot,
     config::Config,
     peers::PeerManager,
     protocol::clipboard_wire::{parse_clipboard_body, ClipboardRequestError},
@@ -13,11 +14,12 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub type ClipboardRead = Box<dyn FnMut() -> Result<Option<String>, String> + Send>;
-pub type ClipboardWrite = Box<dyn FnMut(&str) -> Result<(), String> + Send>;
+pub type ClipboardRead = Box<dyn FnMut() -> Result<ClipboardSnapshot, String> + Send>;
+pub type ClipboardWrite = Box<dyn FnMut(&str, u64) -> Result<(), String> + Send>;
+pub type ClipboardEventWait = Box<dyn FnMut(Duration) -> bool + Send>;
 struct Desktop {
     read: ClipboardRead,
     write: ClipboardWrite,
@@ -26,14 +28,28 @@ struct Desktop {
     legacy: HashMap<String, u64>,
     initialized: bool,
     last_hash: Option<String>,
+    generation: u64,
+    session: u64,
     clock: crate::clock_store::ClockStore,
 }
 impl Desktop {
     fn refresh(&mut self, limit: usize) -> Result<bool, String> {
-        let text = (self.read)()?;
-        let text = text.filter(|t| !t.trim().is_empty() && !t.contains('\0') && t.len() <= limit);
+        let snapshot = (self.read)()?;
+        let generation = snapshot.generation;
+        let session = snapshot.session;
+        let text = snapshot
+            .text
+            .filter(|t| !t.trim().is_empty() && !t.contains('\0') && t.len() <= limit);
+        // Generation advances on every selection event, even when the text is
+        // unchanged. A new compositor session is not a new copy: re-baseline so a
+        // pre-existing selection is never fanned out.
+        self.generation = generation;
+        if session != self.session {
+            self.session = session;
+            self.initialized = false;
+        }
         let hash = text
-            .as_ref()
+            .as_deref()
             .map(|t| hex::encode(Sha256::digest(t.as_bytes())));
         if !self.initialized {
             // There is no Wayland copy timestamp for a pre-existing selection.
@@ -53,7 +69,7 @@ impl Desktop {
             self.stamp = stamp;
             self.last_hash = hash;
             self.initialized = true;
-            self.value = text.map(|t| profile(&t, stamp));
+            self.value = text.map(|t| profile(t.as_ref(), stamp));
             return Ok(false);
         }
         if text.as_deref() == self.value.as_ref().and_then(|v| v["text"].as_str()) {
@@ -69,7 +85,7 @@ impl Desktop {
             .map_err(|e| e.to_string())?;
         self.stamp = stamp;
         self.last_hash = hash;
-        self.value = text.map(|t| profile(&t, self.stamp));
+        self.value = text.map(|t| profile(t.as_ref(), self.stamp));
         Ok(true)
     }
 }
@@ -135,6 +151,8 @@ impl SyncRuntime {
             legacy: snapshot.legacy,
             initialized: false,
             last_hash: snapshot.hash,
+            generation: 0,
+            session: 0,
             clock,
         };
         let _ = desktop.refresh(config.max_text_bytes.min(crate::protocol::MAX_TEXT_BYTES));
@@ -256,10 +274,13 @@ impl SyncRuntime {
             return Ok(incoming);
         }
         if !duplicate {
-            (desktop.write)(incoming["text"].as_str().unwrap()).map_err(|e| {
-                eprintln!("desktop clipboard write failed: {e}");
-                error(503, "desktop clipboard unavailable")
-            })?;
+            let expected_generation = desktop.generation;
+            (desktop.write)(incoming["text"].as_str().unwrap(), expected_generation).map_err(
+                |e| {
+                    eprintln!("desktop clipboard write failed: {e}");
+                    error(503, "desktop clipboard unavailable")
+                },
+            )?;
         }
         if let Some((id, n)) = legacy {
             let counter = desktop.legacy.entry(id).or_default();
@@ -289,41 +310,62 @@ impl SyncRuntime {
         }
         Ok(incoming)
     }
-    pub fn start_monitor(self: &Arc<Self>, device_path: Option<PathBuf>) {
+    /// Runs clipboard observation until the runtime is dropped. `wait` blocks up
+    /// to its timeout and returns whether a native selection event woke it, so
+    /// copies propagate immediately while config and revocation maintenance stay
+    /// bounded to a 500 ms cadence.
+    pub fn start_monitor(
+        self: &Arc<Self>,
+        device_path: Option<PathBuf>,
+        mut wait: Option<ClipboardEventWait>,
+    ) {
         let weak = Arc::downgrade(self);
         let stop = Arc::clone(&self.stop);
         std::thread::spawn(move || {
+            let mut next_maintenance = Instant::now();
             while !stop.load(Ordering::Relaxed) {
-                if let Some(runtime) = weak.upgrade() {
-                    let owners = match &device_path {
-                        Some(path) => crate::protocol::devices::DeviceRegistry::open(Some(
-                            path.clone(),
-                        ))
-                        .map(|r| {
-                            r.list()
-                                .into_iter()
-                                .map(|d| d.device_id)
-                                .collect::<Vec<_>>()
-                        }),
-                        None => Ok(Vec::new()),
-                    };
-                    if device_path.is_some() {
-                        let _ = runtime.peers.retain_owners(&owners.unwrap_or_default());
-                    }
-                    let config = runtime.settings();
-                    if config.send_enabled {
-                        let _ = runtime.get();
-                    } else {
-                        // Observe local changes even while sending is paused; never enqueue them.
-                        let _ =
-                            runtime.desktop.lock().unwrap().refresh(
-                                config.max_text_bytes.min(crate::protocol::MAX_TEXT_BYTES),
-                            );
-                    }
-                } else {
-                    break;
+                let now = Instant::now();
+                let maintain = now >= next_maintenance;
+                if maintain {
+                    next_maintenance = now + Duration::from_millis(500);
                 }
-                std::thread::sleep(Duration::from_millis(500));
+                let Some(runtime) = weak.upgrade() else {
+                    break;
+                };
+                if maintain {
+                    if let Some(path) = &device_path {
+                        let owners =
+                            crate::protocol::devices::DeviceRegistry::open(Some(path.clone()))
+                                .map(|registry| {
+                                    registry
+                                        .list()
+                                        .into_iter()
+                                        .map(|d| d.device_id)
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                        let _ = runtime.peers.retain_owners(&owners);
+                    }
+                }
+                let config = runtime.settings();
+                if config.send_enabled {
+                    let _ = runtime.get();
+                } else {
+                    // Observe local changes even while sending is paused; never enqueue them.
+                    let _ = runtime
+                        .desktop
+                        .lock()
+                        .unwrap()
+                        .refresh(config.max_text_bytes.min(crate::protocol::MAX_TEXT_BYTES));
+                }
+                drop(runtime);
+                let timeout = next_maintenance.saturating_duration_since(Instant::now());
+                match wait.as_mut() {
+                    Some(wait_for_selection) => {
+                        let _ = wait_for_selection(timeout);
+                    }
+                    None => std::thread::sleep(timeout),
+                }
             }
         });
     }

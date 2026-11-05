@@ -1,59 +1,45 @@
 use super::*;
+use crate::clipboard::ClipboardSnapshot;
 use crate::peers::Peer;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::time::Instant;
 
 struct Fixture {
     runtime: Arc<SyncRuntime>,
     clipboard: Arc<Mutex<Option<String>>>,
+    generation: Arc<AtomicU64>,
+    session: Arc<AtomicU64>,
     writes: Arc<AtomicUsize>,
+    last_write_generation: Arc<Mutex<Option<u64>>>,
+    conflict_next_write: Arc<AtomicBool>,
     read_fails: Arc<AtomicBool>,
     write_fails: Arc<AtomicBool>,
 }
 impl Fixture {
     fn new(config: Config, path: Option<PathBuf>) -> Self {
-        let clipboard = Arc::new(Mutex::new(None::<String>));
-        let writes = Arc::new(AtomicUsize::new(0));
-        let read_fails = Arc::new(AtomicBool::new(false));
-        let write_fails = Arc::new(AtomicBool::new(false));
-        let read_clipboard = clipboard.clone();
-        let read_flag = read_fails.clone();
-        let write_clipboard = clipboard.clone();
-        let write_flag = write_fails.clone();
-        let count = writes.clone();
-        let runtime = SyncRuntime::new(
-            config,
-            path,
-            PeerManager::open(None).unwrap(),
-            Box::new(move || {
-                if read_flag.load(Ordering::Relaxed) {
-                    Err("injected read failure".into())
-                } else {
-                    Ok(read_clipboard.lock().unwrap().clone())
-                }
-            }),
-            Box::new(move |text| {
-                if write_flag.load(Ordering::Relaxed) {
-                    return Err("injected write failure".into());
-                }
-                count.fetch_add(1, Ordering::Relaxed);
-                *write_clipboard.lock().unwrap() = Some(text.into());
-                Ok(())
-            }),
-        );
-        Self {
-            runtime,
-            clipboard,
-            writes,
-            read_fails,
-            write_fails,
-        }
+        Self::seeded(config, path, None, None)
     }
     fn standard() -> Self {
         Self::new(Config::default(), None)
     }
     fn local(&self, text: Option<&str>) {
         *self.clipboard.lock().unwrap() = text.map(str::to_owned);
+        // Every real selection replacement advances the backend generation.
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+    fn advance_generation(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::Relaxed) + 1
+    }
+    fn reconnect(&self, text: Option<&str>) {
+        *self.clipboard.lock().unwrap() = text.map(str::to_owned);
+        self.session.fetch_add(1, Ordering::Relaxed);
+        self.generation.store(1, Ordering::Relaxed);
+    }
+    fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+    fn conflict_on_next_write(&self) {
+        self.conflict_next_write.store(true, Ordering::Relaxed);
     }
     fn put(&self, text: &str, stamp: i64) -> Result<Value, ClipboardRequestError> {
         self.runtime.put(&body(text, json!(stamp)), "phone")
@@ -293,27 +279,55 @@ impl Fixture {
         clock_path: Option<PathBuf>,
     ) -> Self {
         let clipboard = Arc::new(Mutex::new(initial.map(str::to_owned)));
+        let generation = Arc::new(AtomicU64::new(0));
+        let session = Arc::new(AtomicU64::new(0));
         let writes = Arc::new(AtomicUsize::new(0));
+        let last_write_generation = Arc::new(Mutex::new(None));
+        let conflict_next_write = Arc::new(AtomicBool::new(false));
         let read_fails = Arc::new(AtomicBool::new(false));
         let write_fails = Arc::new(AtomicBool::new(false));
+
         let read_clipboard = clipboard.clone();
+        let read_generation = generation.clone();
+        let read_session = session.clone();
         let read_flag = read_fails.clone();
-        let write_clipboard = clipboard.clone();
-        let write_flag = write_fails.clone();
-        let count = writes.clone();
         let read: ClipboardRead = Box::new(move || {
             if read_flag.load(Ordering::Relaxed) {
-                Err("injected read failure".into())
-            } else {
-                Ok(read_clipboard.lock().unwrap().clone())
+                return Err("injected read failure".into());
             }
+            let text = read_clipboard.lock().unwrap().clone();
+            Ok(ClipboardSnapshot {
+                generation: read_generation.load(Ordering::Relaxed),
+                session: read_session.load(Ordering::Relaxed),
+                text: text.map(Arc::<str>::from),
+            })
         });
-        let write: ClipboardWrite = Box::new(move |text| {
+
+        let write_clipboard = clipboard.clone();
+        let write_generation = generation.clone();
+        let write_flag = write_fails.clone();
+        let count = writes.clone();
+        let last_expected = last_write_generation.clone();
+        let conflict = conflict_next_write.clone();
+        let write: ClipboardWrite = Box::new(move |text, expected_generation| {
             if write_flag.load(Ordering::Relaxed) {
                 return Err("injected write failure".into());
             }
-            count.fetch_add(1, Ordering::Relaxed);
+            *last_expected.lock().unwrap() = Some(expected_generation);
+            if conflict.swap(false, Ordering::Relaxed) {
+                // A different selection replaced the one the read observed.
+                write_generation.fetch_add(1, Ordering::Relaxed);
+                return Err("selection changed before write".into());
+            }
+            let current = write_generation.load(Ordering::Relaxed);
+            if expected_generation != current {
+                return Err(format!(
+                    "expected generation {expected_generation}, current {current}"
+                ));
+            }
+            write_generation.fetch_add(1, Ordering::Relaxed);
             *write_clipboard.lock().unwrap() = Some(text.into());
+            count.fetch_add(1, Ordering::Relaxed);
             Ok(())
         });
         let peers = PeerManager::open(None).unwrap();
@@ -326,7 +340,11 @@ impl Fixture {
         Self {
             runtime,
             clipboard,
+            generation,
+            session,
             writes,
+            last_write_generation,
+            conflict_next_write,
             read_fails,
             write_fails,
         }
@@ -574,4 +592,129 @@ fn invalid_or_unreadable_config_pauses_both_directions_without_identity_rotation
     f.put("explicitly resumed", future()).unwrap();
     assert_eq!(f.write_count(), 1);
     assert_eq!(f.runtime.settings().server_id, config.server_id);
+}
+
+#[test]
+fn snapshot_generation_propagates_into_conditional_writes() {
+    let f = Fixture::standard();
+    let stamp = future();
+    f.put("first", stamp).unwrap();
+    assert_eq!(f.write_count(), 1);
+    let after_own_write = f.current_generation();
+    assert_eq!(
+        *f.last_write_generation.lock().unwrap(),
+        Some(after_own_write - 1),
+        "the write must carry the generation observed by the preceding read"
+    );
+
+    // A selection event with unchanged text still advances the generation
+    // without touching the clock or profile.
+    let unchanged = f.runtime.get().unwrap().unwrap();
+    let before = f.runtime.desktop.lock().unwrap().clock.snapshot();
+    let advanced = f.advance_generation();
+    let same = f.runtime.get().unwrap().unwrap();
+    assert_eq!(same, unchanged);
+    assert_eq!(f.runtime.desktop.lock().unwrap().generation, advanced);
+    assert_eq!(f.runtime.desktop.lock().unwrap().clock.snapshot(), before);
+
+    f.put("second", stamp + 1).unwrap();
+    assert_eq!(f.write_count(), 2);
+    assert_eq!(*f.last_write_generation.lock().unwrap(), Some(advanced));
+}
+
+#[test]
+fn failed_conditional_write_never_advances_clock_or_profile() {
+    let f = Fixture::standard();
+    let stamp = future();
+    f.put("stable", stamp).unwrap();
+    let before_value = f.runtime.desktop.lock().unwrap().value.clone();
+    let before_clock = f.runtime.desktop.lock().unwrap().clock.snapshot();
+    let before_stamp = f.runtime.desktop.lock().unwrap().stamp;
+
+    // The selection is replaced after the read but before the conditional write.
+    f.conflict_on_next_write();
+    assert_eq!(f.put("raced copy", stamp + 1).unwrap_err().status, 503);
+
+    let desktop = f.runtime.desktop.lock().unwrap();
+    assert_eq!(desktop.value, before_value);
+    assert_eq!(desktop.stamp, before_stamp);
+    assert_eq!(desktop.clock.snapshot(), before_clock);
+    drop(desktop);
+    assert_eq!(f.write_count(), 1);
+    assert_eq!(f.clipboard.lock().unwrap().as_deref(), Some("stable"));
+
+    // The replacement generation is observed by the next read, so a retry
+    // against the new selection is accepted.
+    assert_eq!(
+        f.put("raced copy", stamp + 1).unwrap()["text"],
+        "raced copy"
+    );
+    assert_eq!(f.write_count(), 2);
+}
+
+#[test]
+fn reconnect_rebaselines_without_fanning_out_a_preexisting_selection() {
+    let f = Fixture::standard();
+    let stamp = future();
+    f.put("known phone copy", stamp).unwrap();
+
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = socket.local_addr().unwrap();
+    drop(socket);
+    f.runtime
+        .peers
+        .register(
+            "observer",
+            Peer {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "observer".into(),
+                origin: format!("https://{address}"),
+                fingerprint: "ab".repeat(32),
+                token: crate::protocol::encode_secret(&[7; 32]).unwrap(),
+            },
+        )
+        .unwrap();
+
+    // A new compositor session exposes a pre-existing selection we never saw
+    // copied; it must stay an unknown baseline instead of being published.
+    f.reconnect(Some("pre-existing desktop selection"));
+    assert!(
+        f.runtime.get().unwrap().is_none(),
+        "unknown reconnect selection must map to no content"
+    );
+    assert_eq!(f.runtime.desktop.lock().unwrap().stamp, 0);
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        !f.runtime.peers.failed("observer"),
+        "reconnect baseline must not fan out"
+    );
+
+    // A genuinely new copy in the reconnected session still propagates.
+    f.local(Some("brand new desktop copy"));
+    let value = f.runtime.get().unwrap().unwrap();
+    assert_eq!(value["text"], "brand new desktop copy");
+    assert!(value["stamp"].as_i64().unwrap() > 0);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !f.runtime.peers.failed("observer") && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(f.runtime.peers.failed("observer"));
+    assert_eq!(f.runtime.desktop.lock().unwrap().session, 1);
+}
+
+#[test]
+fn reconnect_with_the_same_selection_keeps_the_known_clock() {
+    let f = Fixture::standard();
+    let stamp = future();
+    f.put("surviving copy", stamp).unwrap();
+    let before = f.runtime.desktop.lock().unwrap().clock.snapshot();
+    f.reconnect(Some("surviving copy"));
+    let value = f.runtime.get().unwrap().unwrap();
+    assert_eq!(value["stamp"], stamp);
+    assert_eq!(f.runtime.desktop.lock().unwrap().clock.snapshot(), before);
+    assert_eq!(
+        f.runtime.desktop.lock().unwrap().generation,
+        1,
+        "session generation must be tracked even when text is unchanged"
+    );
 }

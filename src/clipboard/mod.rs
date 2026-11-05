@@ -1,4 +1,5 @@
-use crate::protocol::{ClipboardProfile, ProfileError};
+use std::sync::Arc;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderStatus {
     Starting,
@@ -7,32 +8,15 @@ pub enum ProviderStatus {
     Disconnected,
     Reconnecting,
 }
-pub trait ClipboardProvider {
-    fn status(&self) -> ProviderStatus;
-    fn read(&mut self) -> Result<Option<ClipboardProfile>, ProfileError>;
-    fn write(&mut self, profile: &ClipboardProfile) -> Result<(), ProfileError>;
+
+/// An immutable selection from one compositor connection. Generation is used
+/// for conditional writes; session prevents a reconnect being mistaken for a copy.
+#[derive(Debug, Clone)]
+pub struct ClipboardSnapshot {
+    pub generation: u64,
+    pub session: u64,
+    pub text: Option<Arc<str>>,
 }
-#[derive(Debug, Default)]
-pub struct UnavailableProvider;
-impl ClipboardProvider for UnavailableProvider {
-    fn status(&self) -> ProviderStatus {
-        ProviderStatus::Unsupported
-    }
-    fn read(&mut self) -> Result<Option<ClipboardProfile>, ProfileError> {
-        Ok(None)
-    }
-    fn write(&mut self, _: &ClipboardProfile) -> Result<(), ProfileError> {
-        Err(ProfileError::InvalidUtf8)
-    }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn unavailable_is_explicit() {
-        let mut p = UnavailableProvider;
-        assert_eq!(p.status(), ProviderStatus::Unsupported);
-        assert!(p.read().unwrap().is_none());
-    }
-}
+
+#[cfg(feature = "wayland")]
 pub mod wayland;

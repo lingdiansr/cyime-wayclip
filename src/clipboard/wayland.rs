@@ -1,213 +1,355 @@
-#[cfg(feature = "wayland")]
-use wayland_client::{
-    globals::{registry_queue_init, GlobalListContents},
-    protocol::wl_registry,
-    Connection, Dispatch, QueueHandle,
+//! A single native Wayland owner, shared through immutable selection snapshots.
+use super::{ClipboardSnapshot, ProviderStatus};
+use std::{
+    io::{self, Read, Write},
+    os::{fd::AsRawFd, unix::net::UnixStream},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, SyncSender},
+        Arc, Condvar, Mutex,
+    },
+    thread::JoinHandle,
+    time::{Duration, Instant},
 };
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WaylandCapabilities {
-    pub connected: bool,
-    pub globals: Vec<String>,
+use wayland_client::Connection;
+
+mod connect;
+mod native;
+
+const IO_TIMEOUT: Duration = Duration::from_secs(2);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_TRANSFERS: usize = 16;
+const COMMAND_CAPACITY: usize = 16;
+const TEXT_MIMES: &[&str] = &[
+    "text/plain;charset=utf-8",
+    "text/plain;charset=UTF-8",
+    "UTF8_STRING",
+    "text/plain",
+];
+
+#[derive(Debug, Clone)]
+pub struct BackendInfo {
+    pub status: ProviderStatus,
+    pub protocol: Option<&'static str>,
+    pub seat: Option<String>,
+    pub seats: Vec<String>,
+    pub message: String,
 }
-#[cfg(feature = "wayland")]
-pub fn detect() -> WaylandCapabilities {
-    let Ok(conn) = Connection::connect_to_env() else {
-        return WaylandCapabilities {
-            connected: false,
-            globals: vec![],
-        };
-    };
-    let Ok((globals, _)) = registry_queue_init::<WaylandCapabilities>(&conn) else {
-        return WaylandCapabilities {
-            connected: false,
-            globals: vec![],
-        };
-    };
-    WaylandCapabilities {
-        connected: true,
-        globals: globals
-            .contents()
-            .clone_list()
-            .into_iter()
-            .map(|g| g.interface)
-            .collect(),
+
+#[derive(Clone)]
+pub struct WaylandClipboard {
+    inner: Arc<Handle>,
+}
+
+struct Published {
+    info: BackendInfo,
+    generation: u64,
+    session: u64,
+    revision: u64,
+    text: Option<Arc<str>>,
+    pending: bool,
+    error: Option<String>,
+}
+
+struct Shared {
+    state: Mutex<Published>,
+    changed: Condvar,
+    stop: AtomicBool,
+}
+
+impl Shared {
+    fn update<T>(&self, change: impl FnOnce(&mut Published) -> T) -> T {
+        let mut state = self.state.lock().unwrap();
+        let result = change(&mut state);
+        state.revision = state.revision.wrapping_add(1);
+        drop(state);
+        self.changed.notify_all();
+        result
+    }
+
+    fn unavailable(&self, status: ProviderStatus, message: String) {
+        self.update(|state| {
+            state.info.status = status;
+            state.info.protocol = None;
+            state.info.seat = None;
+            state.info.seats.clear();
+            state.info.message = message;
+            state.generation = state.generation.wrapping_add(1);
+            state.text = None;
+            state.pending = false;
+            state.error = None;
+        });
+    }
+
+    fn begin_session(&self) {
+        self.update(|state| {
+            state.session = state.session.wrapping_add(1);
+            state.generation = state.generation.wrapping_add(1);
+            state.text = None;
+            state.error = None;
+            state.pending = true;
+            state.info.status = ProviderStatus::Starting;
+            state.info.message = "enumerating Wayland registry and seats".into();
+        });
+    }
+
+    fn selection(&self, pending: bool) -> u64 {
+        self.update(|state| {
+            state.generation = state.generation.wrapping_add(1);
+            state.text = None;
+            state.pending = pending;
+            state.error = None;
+            state.generation
+        })
+    }
+
+    fn finish_read(&self, generation: u64, result: Result<Option<Arc<str>>, String>) {
+        self.update(|state| {
+            if state.generation != generation {
+                return;
+            }
+            state.pending = false;
+            match result {
+                Ok(text) => {
+                    state.text = text;
+                    state.error = None;
+                }
+                Err(error) => {
+                    state.text = None;
+                    state.error = Some(error);
+                }
+            }
+        });
     }
 }
-#[cfg(not(feature = "wayland"))]
-pub fn detect() -> WaylandCapabilities {
-    WaylandCapabilities {
-        connected: false,
-        globals: vec![],
-    }
+
+struct WriteCommand {
+    text: Arc<str>,
+    generation: u64,
+    deadline: Instant,
+    reply: SyncSender<Result<(), String>>,
 }
-impl WaylandCapabilities {
-    pub fn provider_status(&self) -> super::ProviderStatus {
-        if self.supports_data_control() {
-            super::ProviderStatus::Ready
-        } else if self.connected {
-            super::ProviderStatus::Unsupported
-        } else {
-            super::ProviderStatus::Disconnected
+
+struct Handle {
+    shared: Arc<Shared>,
+    commands: SyncSender<WriteCommand>,
+    wake: Mutex<UnixStream>,
+    worker: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        self.shared.stop.store(true, Ordering::Release);
+        let _ = self.wake.lock().unwrap().write(&[1]);
+        self.shared.changed.notify_all();
+        if let Some(worker) = self.worker.lock().unwrap().take() {
+            let _ = worker.join();
         }
     }
-    pub fn supports_data_control(&self) -> bool {
-        self.globals.iter().any(|g| g.contains("data_control"))
+}
+
+impl WaylandClipboard {
+    /// Construction succeeds even when the compositor is not available yet.
+    /// Connection and registry failures are observable through info()/read().
+    pub fn start(seat: Option<String>) -> io::Result<Self> {
+        start_with_connector(seat, connect::environment)
     }
-    pub fn diagnostic(&self) -> &'static str {
-        if !self.connected {
-            "Wayland unavailable: cannot connect to compositor"
-        } else if !self.supports_data_control() {
-            "Wayland connected but no data-control protocol advertised"
-        } else {
-            "Wayland data-control protocol detected"
+
+    pub fn info(&self) -> BackendInfo {
+        let state = self.inner.shared.state.lock().unwrap();
+        BackendInfo {
+            status: state.info.status,
+            protocol: state.info.protocol,
+            seat: state.info.seat.clone(),
+            seats: state.info.seats.clone(),
+            message: state.error.clone().unwrap_or_else(|| {
+                if state.pending && state.info.status == ProviderStatus::Ready {
+                    "Wayland selection transfer is pending".into()
+                } else {
+                    state.info.message.clone()
+                }
+            }),
+        }
+    }
+
+    /// Never performs Wayland I/O or waits for a clipboard owner.
+    pub fn read(&self) -> Result<ClipboardSnapshot, String> {
+        let state = self.inner.shared.state.lock().unwrap();
+        if state.info.status != ProviderStatus::Ready {
+            return Err(state.info.message.clone());
+        }
+        if state.pending {
+            return Err("Wayland selection transfer is pending".into());
+        }
+        if let Some(error) = &state.error {
+            return Err(error.clone());
+        }
+        Ok(ClipboardSnapshot {
+            generation: state.generation,
+            session: state.session,
+            text: state.text.clone(),
+        })
+    }
+
+    /// Installs a new source only if the previously observed selection is current.
+    /// Success means the compositor processed set_selection, not that somebody pasted.
+    pub fn write(&self, text: &str, expected_generation: u64) -> Result<(), String> {
+        if text.len() > crate::protocol::MAX_TEXT_BYTES
+            || text.contains('\0')
+            || text.trim().is_empty()
+        {
+            return Err("invalid clipboard text".into());
+        }
+        let deadline = Instant::now() + WRITE_TIMEOUT;
+        let (reply, result) = mpsc::sync_channel(1);
+        self.inner
+            .commands
+            .try_send(WriteCommand {
+                text: Arc::from(text),
+                generation: expected_generation,
+                deadline,
+                reply,
+            })
+            .map_err(|_| "Wayland command queue is full or unavailable".to_string())?;
+        match self.inner.wake.lock().unwrap().write(&[1]) {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e.to_string()),
+        }
+        result
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| "Wayland write timed out or worker stopped".to_string())?
+    }
+
+    /// Revision includes completed reads and status changes, unlike selection generation.
+    pub fn wait_for_change(&self, revision: u64, timeout: Duration) -> u64 {
+        let state = self.inner.shared.state.lock().unwrap();
+        let (state, _) = self
+            .inner
+            .shared
+            .changed
+            .wait_timeout_while(state, timeout, |state| {
+                state.revision == revision && !self.inner.shared.stop.load(Ordering::Acquire)
+            })
+            .unwrap();
+        state.revision
+    }
+}
+
+fn start_with_connector<F>(seat: Option<String>, mut connector: F) -> io::Result<WaylandClipboard>
+where
+    F: FnMut() -> Result<Connection, String> + Send + 'static,
+{
+    let shared = Arc::new(Shared {
+        state: Mutex::new(Published {
+            info: BackendInfo {
+                status: ProviderStatus::Starting,
+                protocol: None,
+                seat: None,
+                seats: Vec::new(),
+                message: "starting native Wayland worker".into(),
+            },
+            generation: 0,
+            session: 0,
+            revision: 0,
+            text: None,
+            pending: true,
+            error: None,
+        }),
+        changed: Condvar::new(),
+        stop: AtomicBool::new(false),
+    });
+    let (wake, mut incoming) = UnixStream::pair()?;
+    wake.set_nonblocking(true)?;
+    incoming.set_nonblocking(true)?;
+    let (commands, receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
+    let worker_shared = Arc::clone(&shared);
+    let worker = std::thread::Builder::new()
+        .name("wayland-clipboard".into())
+        .spawn(move || {
+            let mut attempt = 0usize;
+            while !worker_shared.stop.load(Ordering::Acquire) {
+                if attempt > 0 {
+                    worker_shared.unavailable(
+                        ProviderStatus::Reconnecting,
+                        "reconnecting to Wayland compositor".into(),
+                    );
+                }
+                let result = connector().and_then(|connection| {
+                    worker_shared.begin_session();
+                    native::run(
+                        connection,
+                        &worker_shared,
+                        &mut incoming,
+                        &receiver,
+                        seat.clone(),
+                    )
+                });
+                if worker_shared.stop.load(Ordering::Acquire) {
+                    break;
+                }
+                if worker_shared.state.lock().unwrap().info.status == ProviderStatus::Ready {
+                    attempt = 0;
+                }
+                worker_shared.unavailable(
+                    ProviderStatus::Disconnected,
+                    result
+                        .err()
+                        .unwrap_or_else(|| "Wayland device finished".into()),
+                );
+                // A connection that reached Ready starts a fresh failure sequence.
+                let delays = [1u64, 2, 5, 10, 30];
+                let delay = Duration::from_secs(delays[attempt.min(delays.len() - 1)]);
+                attempt = (attempt + 1).min(delays.len() - 1);
+                let jitter =
+                    Duration::from_millis(crate::sync_runtime::now_ms().unsigned_abs() % 101);
+                let retry_at = Instant::now() + delay + jitter;
+                while !worker_shared.stop.load(Ordering::Acquire) && Instant::now() < retry_at {
+                    reject_commands(&receiver, "Wayland compositor unavailable");
+                    let remaining = retry_at.saturating_duration_since(Instant::now());
+                    let mut poll = libc::pollfd {
+                        fd: incoming.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    unsafe { libc::poll(&mut poll, 1, remaining.as_millis().min(100) as i32) };
+                    drain_wake(&mut incoming);
+                }
+            }
+            reject_commands(&receiver, "Wayland worker stopped");
+        })?;
+    Ok(WaylandClipboard {
+        inner: Arc::new(Handle {
+            shared,
+            commands,
+            wake: Mutex::new(wake),
+            worker: Mutex::new(Some(worker)),
+        }),
+    })
+}
+
+fn reject_commands(receiver: &Receiver<WriteCommand>, message: &str) {
+    for _ in 0..COMMAND_CAPACITY {
+        let Ok(command) = receiver.try_recv() else {
+            break;
+        };
+        let _ = command.reply.try_send(Err(message.into()));
+    }
+}
+
+fn drain_wake(stream: &mut UnixStream) {
+    let mut buffer = [0; 128];
+    for _ in 0..COMMAND_CAPACITY {
+        let Ok(n) = stream.read(&mut buffer) else {
+            break;
+        };
+        if n == 0 {
+            break;
         }
     }
 }
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn fallback_is_explicit() {
-        let c = WaylandCapabilities {
-            connected: false,
-            globals: vec![],
-        };
-        assert!(!c.supports_data_control());
-        assert!(c.diagnostic().contains("unavailable"));
-    }
-    #[test]
-    fn detects_protocol() {
-        let c = WaylandCapabilities {
-            connected: true,
-            globals: vec!["zwlr_data_control_manager_v1".into()],
-        };
-        assert!(c.supports_data_control());
-    }
-}
-
-#[cfg(feature = "wayland")]
-impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandCapabilities {
-    fn event(
-        _: &mut Self,
-        _: &wl_registry::WlRegistry,
-        _: <wl_registry::WlRegistry as wayland_client::Proxy>::Event,
-        _: &GlobalListContents,
-        _: &wayland_client::Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
-}
-#[cfg(feature = "wayland")]
-pub fn has_ext_data_control(caps: &WaylandCapabilities) -> bool {
-    caps.globals
-        .iter()
-        .any(|g| g == "ext_data_control_manager_v1")
-}
-#[cfg(all(test, feature = "wayland"))]
-mod ext_tests {
-    use super::*;
-    #[test]
-    fn ext_detection() {
-        let c = WaylandCapabilities {
-            connected: true,
-            globals: vec!["ext_data_control_manager_v1".into()],
-        };
-        assert!(has_ext_data_control(&c));
-    }
-}
-#[cfg(feature = "wayland")]
-pub struct DataControlProvider {
-    pub capabilities: WaylandCapabilities,
-}
-#[cfg(feature = "wayland")]
-impl DataControlProvider {
-    pub fn new(capabilities: WaylandCapabilities) -> Option<Self> {
-        if has_ext_data_control(&capabilities) {
-            Some(Self { capabilities })
-        } else {
-            None
-        }
-    }
-    pub fn is_bound(&self) -> bool {
-        has_ext_data_control(&self.capabilities)
-    }
-}
-#[cfg(all(test, feature = "wayland"))]
-mod provider_tests {
-    use super::*;
-    #[test]
-    fn binds_only_when_advertised() {
-        let c = WaylandCapabilities {
-            connected: true,
-            globals: vec!["ext_data_control_manager_v1".into()],
-        };
-        assert!(DataControlProvider::new(c).unwrap().is_bound());
-    }
-}
-/// Data-control integration boundary. A real event loop must dispatch Wayland
-/// events and service offer FDs without blocking the queue; this type documents
-/// the required operations while preserving the provider's single-owner rule.
-#[cfg(feature = "wayland")]
-impl DataControlProvider {
-    pub fn read_selection(
-        &mut self,
-    ) -> Result<Option<crate::protocol::ClipboardProfile>, crate::protocol::ProfileError> {
-        Err(crate::protocol::ProfileError::InvalidUtf8)
-    }
-    pub fn write_selection(
-        &mut self,
-        _: &crate::protocol::ClipboardProfile,
-    ) -> Result<(), crate::protocol::ProfileError> {
-        Err(crate::protocol::ProfileError::InvalidUtf8)
-    }
-}
-#[cfg(feature = "wayland")]
-pub fn copy_text(text: &str) -> Result<(), String> {
-    // wl-copy owns a Wayland data source and remains alive to serve requests;
-    // spawning it keeps the HTTP worker nonblocking while preserving lifetime.
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("wl-copy")
-        .arg("--type")
-        .arg("text/plain;charset=utf-8")
-        .stdin(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawn wl-copy: {e}"))?;
-    child
-        .stdin
-        .take()
-        .ok_or("wl-copy stdin unavailable")?
-        .write_all(text.as_bytes())
-        .map_err(|e| format!("write wl-copy: {e}"))?;
-    let status = child.wait().map_err(|e| format!("wait wl-copy: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("wl-copy exited {status}"))
-    }
-}
-
-#[cfg(feature = "wayland")]
-pub fn paste_text() -> Result<String, String> {
-    paste_text_optional()?.ok_or_else(|| "No suitable type of content copied".into())
-}
-
-#[cfg(feature = "wayland")]
-pub fn paste_text_optional() -> Result<Option<String>, String> {
-    use wl_clipboard_rs::paste::{get_contents, ClipboardType, Error, MimeType, Seat};
-    let (pipe, _) = match get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Text) {
-        Ok(contents) => contents,
-        Err(Error::ClipboardEmpty | Error::NoMimeType | Error::NoSeats) => return Ok(None),
-        Err(e) => return Err(e.to_string()),
-    };
-    use std::io::Read;
-    let mut s = String::new();
-    pipe.take((crate::protocol::MAX_TEXT_BYTES + 1) as u64)
-        .read_to_string(&mut s)
-        .map_err(|e| e.to_string())?;
-    if s.len() > crate::protocol::MAX_TEXT_BYTES {
-        return Ok(None);
-    }
-    Ok(Some(s))
-}
+#[path = "wayland_tests.rs"]
+mod tests;

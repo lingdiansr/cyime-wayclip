@@ -12,7 +12,7 @@
 
 ## 当前能力
 
-- Wayland 桌面剪贴板读取和写入
+- 原生 Wayland 桌面剪贴板读写：常驻 ext/wlr data-control 后端
 - Linux 与 Android 文本剪贴板双向同步
 - Android v2 HTTPS/二维码配对
 - 证书指纹固定和 Bearer Token 认证
@@ -24,6 +24,10 @@
 
 当前版本只支持**文本**剪贴板，不支持图片或其它二进制数据。v2 主动推送、附近配对与显式授权的多设备组网见文末说明；不提供 Linux 扫描设备或图形管理界面。
 
+当前实现状态与剩余工作见 [实施路线图](implementation-plan.md)。原生 Wayland 后端已替换旧的外部工具路径，
+提供 source 生命周期、有界 I/O、generation 条件写入、seat 选择与断连恢复。
+源码实现、自动化测试和跨桌面/多设备验收分别记录，不将“可以连接”等同于全部路线图完成。
+
 ## 环境要求
 
 - Linux
@@ -32,6 +36,25 @@
 - Linux 与 Android 位于同一可信局域网/Wi-Fi
 
 本项目不提供 X11 回退，也不建议将服务暴露到公网。
+
+### 原生 Wayland 后端
+
+剪贴板连接、offer 和 source 由进程内的单一 worker 持有；优先使用 `ext-data-control-v1`，
+不可用时使用 `wlr-data-control-unstable-v1`。无需安装或调用 `wl-copy` / `wl-paste`。
+剪贴板变化通过协议事件唤醒同步；每次 HTTP 读取使用内存快照，不重新连接 compositor。
+读写和 FD 传输有时限与容量上限，桌面不可用、传输超时或 selection 已变化时返回错误，不发送旧缓存冒充当前内容。
+
+默认只在唯一 seat 时自动选择。多个 seat 时先运行 `cyime-wayclip doctor` 查看名称，再显式指定：
+
+```sh
+CYIME_WAYCLIP_SEAT=seat0 cyime-wayclip serve-v2
+```
+
+systemd 用户服务可在 unit 的 `[Service]` 中设置 `Environment=CYIME_WAYCLIP_SEAT=seat0`。
+该环境变量在后端启动时读取，修改后需要重启。没有目标 seat 或 data-control 协议时明确报告不可用，不切换到 X11。
+连接断开、选中 seat 消失或 device 失效后，后端清除旧快照，按 1/2/5/10/30 秒上限加小幅抖动重试；
+恢复后只观察当前 selection，不重放断连前的写入。服务也可以在 compositor 尚未就绪时启动并等待恢复。
+
 
 ## 安装 Linux 服务端
 
@@ -137,8 +160,8 @@ ss -ltn | grep 9876
 
 - **二维码过期或配对失败**：配对 offer 已消费或过期，重新启动 `serve-v2`；
 - **连接超时**：检查手机和 Linux 是否在同一 Wi-Fi、二维码地址是否正确，以及防火墙是否允许 TCP 9876；
-- **已连接但不同步**：连接检查成功不代表上传已成功。运行 `cyime-wayclip -v serve-v2`，检查 `clipboard PUT rejected` 或 `Wayland clipboard write failed`；确认服务以 `--all-features` 构建、安装了 `wl-copy`，且运行在正确的 Wayland 用户会话中。上传格式错误返回 400、超限返回 413、桌面剪贴板写入失败返回 503，不会伪报成功；
-- **服务启动后立即退出**：查看 `journalctl --user`，确认 user systemd、Wayland 环境变量和权限可用。
+- **已连接但不同步**：连接检查成功不代表上传已成功。运行 `cyime-wayclip doctor` 查看原生后端状态、协议、seat 和诊断，再用 `cyime-wayclip -v serve-v2` 查看错误；确认以 `--all-features` 构建并运行在正确的 Wayland 用户会话中。无需安装外部剪贴板工具。上传格式错误返回 400、超限返回 413、桌面不可用或条件写入失败返回 503，不会伪报成功；
+- **Wayland 暂不可用**：检查 `WAYLAND_DISPLAY`、`XDG_RUNTIME_DIR` 和 `CYIME_WAYCLIP_SEAT`。原生后端会重连；systemd 本身的启动错误仍应检查 `journalctl --user`；
 
 ### Android 上传格式兼容
 
@@ -269,8 +292,8 @@ cyime-wayclip config set receive_enabled false
 若反向互认注册在暂停时被取消，需要重新介绍设备。
 配置通常热载，解析或读取失败时会安全暂停两个同步方向，而不是继续使用旧授权方向。
 
-Linux 以约 500ms 间隔监控桌面变化、方向配置和授权撤销；推送发送最新待推内容，
-不会为每份内容无限增建线程或积累完整历史。对端可在推送不可用时继续使用
+Linux 通过原生 Wayland selection 事件监控桌面变化，并以至多约 500ms 的维护间隔检查方向配置和授权撤销；
+推送只发送每设备最新待推内容，不会为每份内容无限增建线程或积累完整历史。对端可在推送不可用时继续使用
 ETag 轮询回退；这不表示 Linux 在主动轮询其它设备。临时出站失败按
 30/120/600 秒退避（后续保持 600 秒），新内容覆盖旧待推内容；
 400/401/403/413/415 属于永久失败，不自动重试。每设备的反向注册与剪贴板推送有独立队列，
@@ -290,3 +313,11 @@ ETag 轮询回退；这不表示 Linux 在主动轮询其它设备。临时出�
 此前已在 Android 实机验证的是上传兼容性修复。本节新增的持久化、附近配对、组网、
 暂停及回调机制，验证依据是 Rust 测试和本机真实 TLS/HTTP 集成测试，
 **尚未完成 Windows 与手机的全量互操作实测**。请勿据此假定已有图片同步、Linux 主动扫描或 GUI 支持。
+
+原生 Wayland 后端另外通过隔离 compositor 的真实协议/FD 测试覆盖 ext/wlr 选择、seat、大小/编码边界、
+慢 owner/consumer、generation 冲突、设备失效与重连。已在 niri 26.04 的独立嵌套 Wayland 会话完成读写冒烟：
+多个原生客户端交替持有 source、重复粘贴、UTF-8/emoji/CRLF，以及 65536 字节背压传输；
+同一隔离会话还验证了生产 HTTPS 入口的 pin、配对 201、PUT 200、独立原生客户端读取，
+以及 GET 200 的正文、SHA-256 和 ETag 一致性。
+测试使用 `PATH=/nonexistent`，未调用外部剪贴板工具，也未写入用户当前桌面的剪贴板。
+KWin/Sway/Hyprland 和多设备真实验收仍需按路线图逐项记录。

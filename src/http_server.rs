@@ -60,12 +60,50 @@ pub fn serve_v2_tls(
     let devices =
         crate::protocol::devices::DeviceRegistry::open(Some(directory.join("devices.json")))?;
     let peers = crate::peers::PeerManager::open(Some(directory.join("peers.json")))?;
+    #[cfg(feature = "wayland")]
+    let (read, write, wait) = {
+        use crate::clipboard::wayland::WaylandClipboard;
+        match WaylandClipboard::start(wayland_seat()) {
+            Ok(clipboard) => {
+                let reader = clipboard.clone();
+                let writer = clipboard.clone();
+                let monitor = clipboard;
+                let mut revision = 0u64;
+                let read: crate::sync_runtime::ClipboardRead = Box::new(move || reader.read());
+                let write: crate::sync_runtime::ClipboardWrite =
+                    Box::new(move |text, expected_generation| {
+                        writer.write(text, expected_generation)
+                    });
+                let wait: crate::sync_runtime::ClipboardEventWait = Box::new(move |timeout| {
+                    let observed = monitor.wait_for_change(revision, timeout);
+                    let changed = observed != revision;
+                    revision = observed;
+                    changed
+                });
+                (read, write, Some(wait))
+            }
+            Err(error) => {
+                eprintln!("Wayland clipboard unavailable: {error}");
+                let (read, write) = unavailable_clipboard("Wayland clipboard unavailable");
+                (read, write, None)
+            }
+        }
+    };
+    #[cfg(not(feature = "wayland"))]
+    let (read, write, wait): (
+        crate::sync_runtime::ClipboardRead,
+        crate::sync_runtime::ClipboardWrite,
+        Option<crate::sync_runtime::ClipboardEventWait>,
+    ) = {
+        let (read, write) = unavailable_clipboard("Wayland support is disabled");
+        (read, write, None)
+    };
     let runtime = crate::sync_runtime::SyncRuntime::persistent(
         state.config.clone(),
         crate::config::Config::path(),
         peers,
-        Box::new(read_clipboard),
-        Box::new(write_clipboard),
+        read,
+        write,
         directory.join("clock.json"),
     )?;
     let nearby_dir = directory.join("nearby");
@@ -114,7 +152,7 @@ pub fn serve_v2_tls(
         },
     )
     .map_err(std::io::Error::other)?;
-    runtime.start_monitor(Some(directory.join("devices.json")));
+    runtime.start_monitor(Some(directory.join("devices.json")), wait);
     serve_requests(
         server.incoming_requests(),
         pairing,
@@ -125,20 +163,22 @@ pub fn serve_v2_tls(
         cfg!(feature = "wayland"),
     )
 }
-fn read_clipboard() -> Result<Option<String>, String> {
-    #[cfg(feature = "wayland")]
-    return crate::clipboard::wayland::paste_text_optional();
-    #[cfg(not(feature = "wayland"))]
-    Err("Wayland support is disabled".into())
+#[cfg(feature = "wayland")]
+fn wayland_seat() -> Option<String> {
+    std::env::var("CYIME_WAYCLIP_SEAT")
+        .ok()
+        .filter(|seat| !seat.trim().is_empty())
 }
-fn write_clipboard(text: &str) -> Result<(), String> {
-    #[cfg(feature = "wayland")]
-    return crate::clipboard::wayland::copy_text(text);
-    #[cfg(not(feature = "wayland"))]
-    {
-        let _ = text;
-        Err("Wayland support is disabled".into())
-    }
+
+/// Keep the HTTP service alive with explicit 503s when no native backend exists.
+type BackendClosures = (
+    crate::sync_runtime::ClipboardRead,
+    crate::sync_runtime::ClipboardWrite,
+);
+fn unavailable_clipboard(message: &'static str) -> BackendClosures {
+    let read: crate::sync_runtime::ClipboardRead = Box::new(move || Err(message.into()));
+    let write: crate::sync_runtime::ClipboardWrite = Box::new(move |_, _| Err(message.into()));
+    (read, write)
 }
 
 // A client disconnect is local to one response, never a reason to stop serving.

@@ -1,6 +1,7 @@
 //! Route-level integration tests: real HTTP framing on ephemeral loopback sockets.
 use super::serve_requests;
 use crate::{
+    clipboard::ClipboardSnapshot,
     config::Config,
     discovery::Nearby,
     peers::PeerManager,
@@ -37,6 +38,8 @@ impl Drop for PrivateState {
 #[derive(Default)]
 struct MemoryClipboard {
     text: Option<String>,
+    generation: u64,
+    session: u64,
     read_error: bool,
     write_error: bool,
     writes: usize,
@@ -74,21 +77,33 @@ impl Listener {
                 if state.read_error {
                     Err("injected read failure".into())
                 } else {
-                    Ok(state.text.clone())
+                    Ok(ClipboardSnapshot {
+                        generation: state.generation,
+                        session: state.session,
+                        text: state.text.clone().map(Arc::<str>::from),
+                    })
                 }
             }),
-            Box::new(move |text| {
+            Box::new(move |text, expected_generation| {
                 let mut state = write_state.lock().unwrap();
                 if state.write_error {
                     return Err("injected write failure".into());
                 }
+                if expected_generation != state.generation {
+                    return Err("selection changed before write".into());
+                }
+                state.generation = state.generation.wrapping_add(1);
                 state.text = Some(text.to_owned());
                 state.writes += 1;
                 Ok(())
             }),
         );
         // Model a copy after the service has observed its initial empty baseline.
-        clipboard.lock().unwrap().text = text.map(str::to_owned);
+        {
+            let mut state = clipboard.lock().unwrap();
+            state.text = text.map(str::to_owned);
+            state.generation = state.generation.wrapping_add(1);
+        }
         let mut pairing = PairingService::new(config.server_id.clone(), "test host");
         let secret = encode_secret(&[11; 32]).unwrap();
         pairing.set_offer(PairOffer {

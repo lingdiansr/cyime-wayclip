@@ -22,8 +22,12 @@ libc = "0.2"
 getrandom = "0.3"
 mdns-sd = "0.20.3"
 png = { version = "0.18", default-features = false }
+wayland-protocols-wlr = { version = "0.3", features = ["client"], optional = true }
 
 [dev-dependencies]
+wayland-protocols = { version = "0.32", features = ["server", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["server"] }
+wayland-server = "0.31"
 
 
 [[bin]]
@@ -31,7 +35,7 @@ name = "cyime-wayclip"
 path = "src/main.rs"
 
 [features]
-wayland = ["dep:wayland-client", "dep:wayland-protocols", "dep:wl-clipboard-rs"]
+wayland = ["dep:wayland-client", "dep:wayland-protocols", "dep:wayland-protocols-wlr"]
 
 [dependencies.wayland-client]
 version = "0.31"
@@ -40,10 +44,6 @@ optional = true
 [dependencies.wayland-protocols]
 version = "0.32"
 features = ["staging", "client"]
-optional = true
-
-[dependencies.wl-clipboard-rs]
-version = "0.9"
 optional = true
 
 [dependencies.qrcodegen]

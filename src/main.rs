@@ -1,5 +1,3 @@
-#[cfg(not(feature = "wayland"))]
-use cyime_wayclip::clipboard::{ClipboardProvider, UnavailableProvider};
 use cyime_wayclip::config::Config;
 mod terminal_qr;
 fn main() {
@@ -51,8 +49,8 @@ fn main() {
 fn help() {
     println!("cyime-wayclip - Wayland clipboard synchronization");
     println!("\nUSAGE:\n  cyime-wayclip <COMMAND> [ADDRESS]");
-    println!("\nCOMMANDS:\n  run                  Inspect Wayland and run the user-session worker");
-    println!("  doctor               Show config path and Wayland capability");
+    println!("\nCOMMANDS:\n  run                  Run the user-session synchronization worker");
+    println!("  doctor               Show config path and clipboard backend status");
     println!("  status               Alias for doctor");
     println!("  config init          Create the default config file");
     println!("  config set KEY VALUE Set a synchronization option atomically");
@@ -161,13 +159,45 @@ fn doctor() {
     println!("config={:?}", Config::path());
     #[cfg(feature = "wayland")]
     {
-        let c = cyime_wayclip::clipboard::wayland::detect();
-        println!("wayland={:?}\n{}", c.provider_status(), c.diagnostic());
+        use cyime_wayclip::clipboard::{wayland::WaylandClipboard, ProviderStatus};
+        let seat = std::env::var("CYIME_WAYCLIP_SEAT")
+            .ok()
+            .filter(|seat| !seat.trim().is_empty());
+        match WaylandClipboard::start(seat) {
+            Ok(clipboard) => {
+                // The worker publishes intermediate status through selection
+                // revisions. Wake on those, but never block past the deadline.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2200);
+                let mut revision = 0u64;
+                let mut info = clipboard.info();
+                while info.status == ProviderStatus::Starting {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    revision = clipboard.wait_for_change(
+                        revision,
+                        remaining.min(std::time::Duration::from_millis(100)),
+                    );
+                    info = clipboard.info();
+                }
+                println!(
+                    "wayland={:?} protocol={:?} seat={:?}",
+                    info.status, info.protocol, info.seat
+                );
+                println!("seats={:?}", info.seats);
+                println!("{}", info.message);
+            }
+            Err(error) => {
+                println!("wayland={:?}", ProviderStatus::Disconnected);
+                println!("start failed: {error}");
+            }
+        }
     }
     #[cfg(not(feature = "wayland"))]
     {
-        let p = UnavailableProvider;
-        println!("wayland={:?}\nfeature wayland disabled", p.status());
+        println!("wayland=Unsupported");
+        println!("feature wayland disabled");
     }
 }
 fn status() {
@@ -176,16 +206,10 @@ fn status() {
 fn run() {
     #[cfg(feature = "wayland")]
     {
-        let c = cyime_wayclip::clipboard::wayland::detect();
-        println!("{}", c.diagnostic());
-        if std::env::var("CYIME_VERBOSITY").is_ok() {
-            eprintln!("Wayland globals: {:?}", c.globals);
-        }
-        if c.provider_status() == cyime_wayclip::clipboard::ProviderStatus::Ready {
-            let addr =
-                std::env::var("CYIME_WAYCLIP_BIND").unwrap_or_else(|_| "0.0.0.0:9876".into());
-            serve_v2(Some(&addr));
-        }
+        // The backend reconnects on its own; never gate the service on a
+        // compositor probe that may race the graphical session coming up.
+        let addr = std::env::var("CYIME_WAYCLIP_BIND").unwrap_or_else(|_| "0.0.0.0:9876".into());
+        serve_v2(Some(&addr));
     }
     #[cfg(not(feature = "wayland"))]
     println!("cyime-wayclip: no Wayland provider available (build with --features wayland)");
